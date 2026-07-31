@@ -1,0 +1,64 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Trimmed pyproject.toml used by .github/workflows/build-wheel.yml to build a
+# pure-Python "core" wheel of gnm-shape (NumPy backend only, no visualization
+# or training frameworks). It is overlaid onto gnm/shape/pyproject.toml at
+# build time by the workflow; the official file is left untouched.
+#
+# Real runtime dependencies of the NumPy geometry path (gnm_numpy.py,
+# gnm_xnp.py, gnm_common.py, gnm_base.py, gnm_data_loader.py, gnm_landmarks.py):
+#   - numpy
+#   - absl-py (absl.logging only)
+#   - etils (enp + epath)
+# Everything else in the official dependency list (tensorflow, opencv-python,
+# trimesh, imageio, ipywidgets, notebook, scipy, ...) is only used by
+# visualization/, demos/ or tests and is intentionally excluded.
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gnm-shape"
+version = "3.0.0+audiorig.1"
+description = "GNM Shape Library (core NumPy wheel, no visualization/training frameworks)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "absl-py",
+    "etils[enp,epath]",
+    "numpy",
+]
+
+[tool.setuptools]
+packages = [
+    "gnm.shape",
+    "gnm.shape.data",
+    "gnm.shape.data.versions",
+    "gnm.shape.fitting_utils",
+    "gnm.shape.visualization",
+]
+package-dir = {"gnm.shape" = "."}
+
+[tool.setuptools.package-data]
+"gnm.shape" = [
+    "data/**/*.npz",
+    "data/**/*.png",
+    "data/**/*.jpg",
+    "data/**/*.md",
+    "data/**/*.h5",
+    "assets/**/*",
+]
