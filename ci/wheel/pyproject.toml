@@ -60,5 +60,7 @@ package-dir = {"gnm.shape" = "."}
     "data/**/*.jpg",
     "data/**/*.md",
     "data/**/*.h5",
-    "assets/**/*",
 ]
+# NOTE: the official package-data also ships "assets/**/*", but that folder is
+# README artwork (~32 MB of teaser gifs) never referenced by the code - it is
+# excluded here to keep the wheel lean.
