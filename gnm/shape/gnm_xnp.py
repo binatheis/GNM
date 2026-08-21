@@ -28,11 +28,12 @@ from etils import enp
 from gnm.shape import gnm_base
 from gnm.shape import gnm_common
 from gnm.shape import gnm_landmarks
+from gnm.shape import gnm_typing
 from gnm.shape.data.versions import gnm_specs
 import numpy as np
 import numpy.typing as npt
 
-enpt = enp.typing
+enpt = gnm_typing.enpt
 
 _NONZERO_THRESHOLD = 1e-4
 _EPSILON = 1e-8
@@ -143,7 +144,11 @@ class GNM(gnm_base.GNMBase):
     }
     self._xnp = enp.get_np_module(self.template_vertex_positions)
     self._landmarks: dict[
-        gnm_landmarks.GNMLandmarksType, tuple[enpt.IntArray, enpt.FloatArray]
+        gnm_landmarks.GNMLandmarksType,
+        tuple[
+            enpt.IntArray,
+            enpt.FloatArray,
+        ],
     ] = {}
 
   @property
@@ -218,7 +223,7 @@ class GNM(gnm_base.GNMBase):
       model_data: Mapping[str, Any],
       xnp: enp.NpModule,
   ) -> Self:
-    """Creates a GNM instance from a model data dictionary and array module."""    
+    """Creates a GNM instance from a model data dictionary and array module."""
     init_kwargs = cls._prepare_init_kwargs(model_data, xnp)
     # pylint: disable=no-value-for-parameter
     instance = super(GNM, cls).__new__(cls)
@@ -266,20 +271,23 @@ class GNM(gnm_base.GNMBase):
   ) -> None:
     error_type = self._shape_error_type
     if identity is not None:
-      if identity.ndim < 1 or identity.shape[-1] != self.identity_dim:
+      if len(identity.shape) < 1 or identity.shape[-1] != self.identity_dim:
         raise error_type(
             f'identity shape mismatch: expected last dim {self.identity_dim},'
             f' got {identity.shape}'
         )
     if expression is not None:
-      if expression.ndim < 1 or expression.shape[-1] != self.expression_dim:
+      if (
+          len(expression.shape) < 1
+          or expression.shape[-1] != self.expression_dim
+      ):
         raise error_type(
             'expression shape mismatch: expected last dim'
             f' {self.expression_dim}, got {expression.shape}'
         )
     if rotations is not None:
       if (
-          rotations.ndim < 2
+          len(rotations.shape) < 2
           or rotations.shape[-2] != self.num_joints
           or rotations.shape[-1] != 3
       ):
@@ -288,7 +296,7 @@ class GNM(gnm_base.GNMBase):
             f' {(self.num_joints, 3)}, got {rotations.shape}'
         )
     if translation is not None:
-      if translation.ndim < 1 or translation.shape[-1] != 3:
+      if len(translation.shape) < 1 or translation.shape[-1] != 3:
         raise error_type(
             'translation shape mismatch: expected last dim 3, got'
             f' {translation.shape}'
@@ -470,7 +478,11 @@ class GNM(gnm_base.GNMBase):
     vertex_uvs[indices[last_indices]] = uvs[last_indices]
     return vertex_uvs
 
-  def add_vertex_group(self, name: str, value: enpt.FloatArray['V']) -> None:
+  def add_vertex_group(
+      self,
+      name: str,
+      value: enpt.FloatArray['V'],  # pyrefly: ignore[unknown-name]
+  ) -> None:
     """Adds a new vertex group.
 
     Args:
@@ -511,7 +523,8 @@ class GNM(gnm_base.GNMBase):
 
   @enp.check_and_normalize_arrays(strict=False)
   def joint_positions_bind_pose(
-      self, identity: enpt.FloatArray['A1 ... An I']
+      self,
+      identity: enpt.FloatArray['A1 ... An I'],
   ) -> enpt.FloatArray['A1 ... An J 3']:
     return gnm_common.joint_positions_bind_pose(
         identity,
@@ -521,7 +534,8 @@ class GNM(gnm_base.GNMBase):
 
   @enp.check_and_normalize_arrays(strict=False)
   def compute_pose_correctives(
-      self, rotations: enpt.FloatArray['A1 ... An J 3']
+      self,
+      rotations: enpt.FloatArray['A1 ... An J 3'],
   ) -> enpt.FloatArray['A1 ... An V 3']:
     return gnm_common.compute_pose_correctives(
         rotations,
@@ -571,7 +585,7 @@ class GNM(gnm_base.GNMBase):
 
   def vertex_group_mask(
       self, *names: str, threshold: float = _NONZERO_THRESHOLD
-  ) -> npt.NDArray[bool]:
+  ) -> npt.NDArray[np.bool_]:
     result_mask = np.zeros(self.num_vertices, dtype=bool)
     for name in names:
       operator, inverse = '|', False
@@ -596,15 +610,17 @@ class GNM(gnm_base.GNMBase):
   ) -> npt.NDArray[np.integer]:
     return np.where(self.vertex_group_mask(*names, threshold=threshold))[0]
 
-  def quad_indices_for_group(self, *names: str) -> npt.NDArray[np.integer]:
-    vertex_indices = self.vertex_group_indices(*names)
-    quads = np.array(self.quads)
-    return np.where(np.all(np.isin(quads, vertex_indices), axis=-1))[0]
+  def quad_indices_for_group(
+      self, *names: str, threshold: float = _NONZERO_THRESHOLD
+  ) -> npt.NDArray[np.integer]:
+    mask = self.vertex_group_mask(*names, threshold=threshold)
+    return np.where(np.all(mask[self.quads], axis=-1))[0]
 
-  def triangle_indices_for_group(self, *names: str) -> npt.NDArray[np.integer]:
-    vertex_indices = self.vertex_group_indices(*names)
-    triangles = np.array(self.triangles)
-    return np.where(np.all(np.isin(triangles, vertex_indices), axis=-1))[0]
+  def triangle_indices_for_group(
+      self, *names: str, threshold: float = _NONZERO_THRESHOLD
+  ) -> npt.NDArray[np.integer]:
+    mask = self.vertex_group_mask(*names, threshold=threshold)
+    return np.where(np.all(mask[self.triangles], axis=-1))[0]
 
   def quads_group(self, *names: str) -> npt.NDArray[np.integer]:
     return np.array(self.quads)[self.quad_indices_for_group(*names)]
@@ -622,14 +638,18 @@ class GNM(gnm_base.GNMBase):
     return self.vertex_uvs[self.vertex_group_indices(*names)]
 
   def compute_vertex_normals(
-      self, vertices: enpt.FloatArray['A1 ... An V 3']
+      self,
+      vertices: enpt.FloatArray['A1 ... An V 3'],
   ) -> enpt.FloatArray['A1 ... An V 3']:
     """Computes vertex normals. Must be overridden by subclasses."""
     raise NotImplementedError(
         'Subclasses must implement compute_vertex_normals.'
     )
 
-  def prune_vertices(self, keep_vertices: enpt.IntArray['V_pruned']) -> None:
+  def prune_vertices(
+      self,
+      keep_vertices: enpt.IntArray['V_pruned'],  # pyrefly: ignore[unknown-name]
+  ) -> None:
     """Prunes model vertices in-place."""
     xnp = self.xnp
     num_vertices = self.num_vertices

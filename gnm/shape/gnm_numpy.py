@@ -126,7 +126,14 @@ class GNM(gnm_xnp.GNM):
       self,
       vertices: npt.NDArray[np.floating],
   ) -> npt.NDArray[np.floating]:
-    """Compute vertex normals for GNM mesh."""
+    """Compute vertex normals for GNM mesh.
+
+    Args:
+      vertices: Vertex positions with shape `(..., V, 3)`.
+
+    Returns:
+      Vertex normals with shape `(..., V, 3)`.
+    """
     batch_dims = vertices.shape[:-2]
     num_vertices = vertices.shape[-2]
     vertices_flat = vertices.reshape(-1, num_vertices, 3)
@@ -140,7 +147,11 @@ class GNM(gnm_xnp.GNM):
     vertex_normals = np.zeros_like(vertices_flat)
     np.add.at(
         vertex_normals,
-        (slice(None), self.triangles, slice(None)),
+        (  # pyrefly: ignore[bad-argument-type]
+            slice(None),
+            self.triangles,
+            slice(None),
+        ),
         face_normals_area[:, :, None, :],
     )
 

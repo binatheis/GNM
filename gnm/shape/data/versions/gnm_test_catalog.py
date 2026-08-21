@@ -12,10 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GNM catalog constants."""
+"""GNM test catalog constants."""
 
 MAINTAINED_MAJOR_VERSIONS = ["v3"]
 MAJOR_VERSION_TO_VARIANTS_MAP = {"v3": ["head"]}
 ALL_VARIANTS = ["head"]
-VARIANT_TO_MODEL_FILE_NAME_MAP = {"head": "gnm_head"}
 VERSION_TO_FULL_VERSION_MAP = {"v3": "v3_0"}

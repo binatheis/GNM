@@ -23,7 +23,7 @@ from gnm.shape import gnm_data_schema
 from gnm.shape import gnm_numpy
 from gnm.shape import gnm_tensorflow
 from gnm.shape import gnm_test_utils
-from gnm.shape.data.versions import gnm_catalog
+from gnm.shape.data.versions import gnm_test_catalog
 import numpy as np
 import tensorflow as tf
 
@@ -31,8 +31,8 @@ _SUPPORTED_VARIANTS = frozenset([
     gnm_tensorflow.GNMVariant.HEAD,
 ])
 
-_MAINTAINED_MAJOR_GNM_VERSIONS = gnm_catalog.MAINTAINED_MAJOR_VERSIONS
-_MAJOR_VERSION_TO_VARIANTS_MAP = gnm_catalog.MAJOR_VERSION_TO_VARIANTS_MAP
+_MAINTAINED_MAJOR_GNM_VERSIONS = gnm_test_catalog.MAINTAINED_MAJOR_VERSIONS
+_MAJOR_VERSION_TO_VARIANTS_MAP = gnm_test_catalog.MAJOR_VERSION_TO_VARIANTS_MAP
 
 BATCH_DIMS = [tuple(), tuple([1]), tuple([1, 2]), tuple([2, 1, 2])]
 
@@ -107,6 +107,32 @@ class GNMTensorflowTest(parameterized.TestCase):
     desired = gnm_np(**parameters_np)
 
     np.testing.assert_almost_equal(actual, desired, decimal=4)
+
+  @parameterized.product(
+      version=_MAINTAINED_MAJOR_GNM_VERSIONS,
+      variant=tuple(_SUPPORTED_VARIANTS),
+      batch_dims=BATCH_DIMS,
+  )
+  def test_compute_vertex_normals_numpy_parity(
+      self, version: str, variant: str, batch_dims: tuple[int, ...]
+  ):
+    """Tests that TensorFlow vertex normals match the NumPy implementation."""
+    if variant not in self.gnms_np[version]:
+      self.skipTest(f'variant {variant} not supported in {version}.')
+    gnm_np = self.gnms_np[version][variant]
+    gnm_tf = self.gnms_tf[version][variant]
+
+    parameters_np = gnm_test_utils.random_gnm_parameters(
+        gnm_np, batch_shape=batch_dims, seed=self.rng
+    )
+    vertices_np = gnm_np(**parameters_np)
+    desired = gnm_np.compute_vertex_normals(vertices_np)
+
+    vertices_tf = tf.convert_to_tensor(vertices_np, dtype=tf.float32)
+    actual = gnm_tf.compute_vertex_normals(vertices_tf)
+
+    self.assertEqual(tuple(actual.shape), vertices_np.shape)
+    np.testing.assert_allclose(actual.numpy(), desired, atol=1e-4)
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
@@ -486,10 +512,10 @@ class GNMTensorflowFactoryMethodsTest(parameterized.TestCase):
 
   @parameterized.product(
       variant=list(_SUPPORTED_VARIANTS),
-      version=gnm_catalog.MAINTAINED_MAJOR_VERSIONS,
+      version=gnm_test_catalog.MAINTAINED_MAJOR_VERSIONS,
   )
   def test_from_local_successful(self, variant, version):
-    if variant.value in gnm_catalog.MAJOR_VERSION_TO_VARIANTS_MAP[version]:
+    if variant.value in gnm_test_catalog.MAJOR_VERSION_TO_VARIANTS_MAP[version]:
       major_version = gnm_tensorflow.GNMMajorVersion(version[1:])
 
       model = gnm_tensorflow.GNM.from_local(major_version, variant)

@@ -74,6 +74,7 @@ class GNM(gnm_xnp.GNM):
   * Q: The number of quads in the mesh topology.
   * T: The number of triangles, in a triangulated version of the mesh topology.
   * G: Number of vertex groups.
+  * P: Number of separate parts of the mesh.
 
   Attributes:
     joint_parent_indices: Parent's index for each joint in the skeleton, (J).
@@ -95,6 +96,21 @@ class GNM(gnm_xnp.GNM):
       3). If they do not exist in the GNM npz, they are set to the identity
       matrix. Note that these are not used to compute the GNM joint and vertex
       positions.
+    quad_uvs: Texture coordinates per quad, (Q, 4, 2).
+    triangle_uvs: Texture coordinates per triangle, (T, 3, 2).
+    mesh_component_names: The vertex group name corresponding to each separate
+      mesh part.
+    mirror_indices: The index of each vertex on the other side of the mesh.
+    variant: The variant of the loaded GNM model.
+    vertex_groups: The weights in each vertex group, (G, V).
+    vertex_group_names: The name of each vertex group, (G,).
+    joint_connections: The joint connections of the GNM rig.
+    joint_children_indices: A dictionary that contains the joint indices of the
+      children of each joint.
+    skinning_segmentation: A decomposition of the vertices into separate parts
+      based on skinning weights.
+    edge_list: The quad topology represented as a list of directed edges (E, 2).
+    vertex_uvs: Per-vertex UV texture coordinates shaped (V, 2).
     num_vertices: The number of vertices in the mesh V.
     num_joints: The number of joints in the skeleton J.
     identity_dim: The dimensionality of the linear identity basis I.
@@ -113,7 +129,14 @@ class GNM(gnm_xnp.GNM):
       self,
       vertices: tf.Tensor,
   ) -> tf.Tensor:
-    """Compute vertex normals for GNM mesh."""
+    """Compute vertex normals for GNM mesh.
+
+    Args:
+      vertices: Vertex positions with shape `(..., V, 3)`.
+
+    Returns:
+      Vertex normals with shape `(..., V, 3)`.
+    """
     batch_dims = tf.shape(vertices)[:-2]
     num_vertices = tf.shape(vertices)[-2]
     vertices_flat = tf.reshape(vertices, (-1, num_vertices, 3))
@@ -125,14 +148,18 @@ class GNM(gnm_xnp.GNM):
     v2 = face_vertices[..., 2, :]
     face_normals_area = tf.experimental.numpy.cross(v1 - v0, v2 - v0, axis=-1)
 
-    data = tf.reshape(face_normals_area[:, :, None, :], (-1, 3))
+    # Replicate each face normal for the three corner vertices it contributes
+    # to, matching the flattened (triangle, corner) order of the segment ids.
+    data = tf.reshape(
+        tf.tile(face_normals_area[:, :, None, :], [1, 1, 3, 1]), (-1, 3)
+    )
     segment_ids = tf.reshape(self.triangles, (-1,))
     segment_ids = tf.tile(segment_ids[None, :], [batch_size, 1])
 
     batch_offset = (
         tf.range(batch_size, dtype=segment_ids.dtype)[:, None] * num_vertices
     )
-    flat_segment_ids = segment_ids + batch_offset
+    flat_segment_ids = tf.reshape(segment_ids + batch_offset, (-1,))
     flat_normals = tf.math.unsorted_segment_sum(
         data, flat_segment_ids, num_segments=batch_size * num_vertices
     )
