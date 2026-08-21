@@ -32,7 +32,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gnm-shape"
-version = "3.0.0+audiorig.1"
+version = "3.0.0+audiorig.2"
 description = "GNM Shape Library (core NumPy wheel, no visualization/training frameworks)"
 readme = "README.md"
 requires-python = ">=3.10"
