@@ -92,9 +92,13 @@ class GNMJaxTest(parameterized.TestCase):
 
     expression_shape = (*n_batch, gnm_np.expression_dim)
     return {  # pyrefly: ignore[bad-return]
+        # pyrefly: ignore[bad-assignment]
         'identity': self.rng.uniform(size=(*n_batch, gnm_np.identity_dim)),
+        # pyrefly: ignore[bad-assignment]
         'expression': self.rng.uniform(size=expression_shape),
+        # pyrefly: ignore[bad-assignment]
         'rotations': self.rng.uniform(size=(*n_batch, gnm_np.num_joints, 3)),
+        # pyrefly: ignore[bad-assignment]
         'translation': self.rng.uniform(size=(*n_batch, 3)),
     }
 
@@ -320,7 +324,7 @@ class GNMJaxTest(parameterized.TestCase):
     # Build a batch of random parameters.
     grad_func = jax.grad(
         lambda *args: jnp.square(gnm(*args)).mean(),
-        argnums=np.array([0, 1, 2, 3]),
+        argnums=np.array([0, 1, 2, 3]),  # pyrefly: ignore[bad-argument-type]
     )
 
     if use_random_kwargs:

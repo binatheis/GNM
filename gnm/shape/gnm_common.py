@@ -358,9 +358,14 @@ def linear_blend_skinning(
   t_bind_to_world = t_world - deltas
 
   # Compute per-vertex 3x3 rotations and 3D translations via skinning weights.
-  per_vertex_r = xnp.einsum('jv,...jmn->...vmn', skinning_weights, r_world)
+  per_vertex_r = xnp.einsum(
+      'jv,...jmn->...vmn', skinning_weights, r_world, **_einsum_kwargs(xnp)
+  )
   per_vertex_t = xnp.einsum(
-      'jv,...jm->...vm', skinning_weights, t_bind_to_world
+      'jv,...jm->...vm',
+      skinning_weights,
+      t_bind_to_world,
+      **_einsum_kwargs(xnp),
   )
 
   # Apply affine transform: V_skinned = R_v @ V_local + T_v
@@ -401,13 +406,19 @@ def vertex_positions_bind_pose(
   identity_deltas = 0.0
   if identity is not None:
     identity_deltas = xnp.einsum(
-        '...i,ijk->...jk', identity, vertex_identity_basis
+        '...i,ijk->...jk',
+        identity,
+        vertex_identity_basis,
+        **_einsum_kwargs(xnp),
     )
 
   expression_deltas = 0.0
   if expression is not None:
     expression_deltas = xnp.einsum(
-        '...i,ijk->...jk', expression, expression_basis
+        '...i,ijk->...jk',
+        expression,
+        expression_basis,
+        **_einsum_kwargs(xnp),
     )
 
   return template_vertex_positions + identity_deltas + expression_deltas
@@ -435,7 +446,12 @@ def joint_positions_bind_pose(
   xnp = enp.get_np_module(template_joint_positions)
   deltas = 0.0
   if identity is not None:
-    deltas = xnp.einsum('...i,ijk->...jk', identity, joint_identity_basis)
+    deltas = xnp.einsum(
+        '...i,ijk->...jk',
+        identity,
+        joint_identity_basis,
+        **_einsum_kwargs(xnp),
+    )
 
   return template_joint_positions + deltas
 
@@ -487,7 +503,10 @@ def compute_pose_correctives(
   )
 
   pose_deltas = xnp.einsum(
-      '...f,fv->...v', pose_features, pose_correctives_regressor
+      '...f,fv->...v',
+      pose_features,
+      pose_correctives_regressor,
+      **_einsum_kwargs(xnp),
   )
   return reshape_with_batch_dims(pose_deltas, (num_vertices, 3), rotations, 2)
 
@@ -500,3 +519,11 @@ def _graph_shape(
     return enp.lazy.tf.shape(array)
   else:
     return array.shape
+
+
+def _einsum_kwargs(xnp: Any) -> dict[str, Any]:
+  """Returns optimization kwargs for einsum if running with NumPy."""
+  if enp.lazy.is_np_xnp(xnp):
+    return dict(optimize=True)
+  return dict()
+

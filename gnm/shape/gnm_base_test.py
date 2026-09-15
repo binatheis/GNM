@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for gnm_base."""
+"""Unit tests for GNMBase factory methods, properties, and serialization."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from unittest import mock
 
 from absl.testing import absltest
 from gnm.shape import gnm_base
@@ -50,7 +51,7 @@ class DummyGNM(gnm_base.GNMBase):
     self.variant = variant
 
   def to_numpy_data_dict(self) -> dict[str, Any]:
-    return {"dummy": 1}
+    return {'dummy': 1}
 
   @classmethod
   def _from_model_data(
@@ -83,6 +84,72 @@ class GNMBaseTest(absltest.TestCase):
     self.assertEqual(new_gnm.version, _TEST_FULL_VERSION)
     self.assertEqual(new_gnm.variant, _TEST_VARIANT)
 
+  def test_from_local(self):
+    with mock.patch.object(
+        gnm_data_loader,
+        'load_model_from_runfile',
+        return_value={'dummy': 1},
+    ) as mock_load:
+      new_gnm = DummyGNM.from_local(_TEST_MAJOR_VERSION, _TEST_VARIANT)
+      self.assertIsInstance(new_gnm, DummyGNM)
+      mock_load.assert_called_once_with(_TEST_MAJOR_VERSION, _TEST_VARIANT)
 
-if __name__ == "__main__":
+  def test_from_remote_default_http(self):
+    with mock.patch.object(
+        gnm_data_loader,
+        'load_model_from_remote',
+        return_value={'dummy': 1},
+    ) as mock_load:
+      new_gnm = DummyGNM.from_remote(_TEST_MAJOR_VERSION, _TEST_VARIANT)
+      self.assertIsInstance(new_gnm, DummyGNM)
+      mock_load.assert_called_once_with(
+          version=_TEST_MAJOR_VERSION,
+          variant=_TEST_VARIANT,
+          source=gnm_specs.GNMRemoteSource.HTTP,
+          cache_dir=None,
+          force_download=False,
+      )
+
+  def test_from_remote_huggingface(self):
+    with mock.patch.object(
+        gnm_data_loader,
+        'load_model_from_remote',
+        return_value={'dummy': 1},
+    ) as mock_load:
+      new_gnm = DummyGNM.from_remote(
+          _TEST_MAJOR_VERSION,
+          _TEST_VARIANT,
+          source=gnm_specs.GNMRemoteSource.HUGGING_FACE,
+      )
+      self.assertIsInstance(new_gnm, DummyGNM)
+      mock_load.assert_called_once_with(
+          version=_TEST_MAJOR_VERSION,
+          variant=_TEST_VARIANT,
+          source=gnm_specs.GNMRemoteSource.HUGGING_FACE,
+          cache_dir=None,
+          force_download=False,
+      )
+
+  def test_from_remote_kaggle(self):
+    with mock.patch.object(
+        gnm_data_loader,
+        'load_model_from_remote',
+        return_value={'dummy': 1},
+    ) as mock_load:
+      new_gnm = DummyGNM.from_remote(
+          _TEST_MAJOR_VERSION,
+          _TEST_VARIANT,
+          source=gnm_specs.GNMRemoteSource.KAGGLE,
+      )
+      self.assertIsInstance(new_gnm, DummyGNM)
+      mock_load.assert_called_once_with(
+          version=_TEST_MAJOR_VERSION,
+          variant=_TEST_VARIANT,
+          source=gnm_specs.GNMRemoteSource.KAGGLE,
+          cache_dir=None,
+          force_download=False,
+      )
+
+
+if __name__ == '__main__':
   absltest.main()

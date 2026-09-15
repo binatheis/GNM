@@ -49,6 +49,7 @@ GNMMajorVersion = gnm_specs.GNMMajorVersion
 GNMVariant = gnm_specs.GNMVariant
 GNMBodyPart = gnm_specs.GNMBodyPart
 GNMLandmarksType = gnm_landmarks.GNMLandmarksType
+GNMRemoteSource = gnm_specs.GNMRemoteSource
 
 _rotation_matrix = gnm_common.axis_angle_to_rotation_matrix
 

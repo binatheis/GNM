@@ -14,7 +14,6 @@
 
 """GNM data loader."""
 
-# from collections.abc import Mapping, Sequence
 from collections.abc import Sequence
 import functools
 from typing import Any
@@ -39,17 +38,6 @@ class GNMModelDataNotLinkedError(Exception):
   pass
 
 
-def _get_model_path_from_version_and_variant(
-    version: gnm_specs.GNMMajorVersion,
-    variant: gnm_specs.GNMVariant,
-) -> epath.Path:
-  """Returns the GNM model runfiles path for given variant and version."""
-  version_value = major_to_newest_full_version(version).value.replace('.', '_')
-  version_dir_name = f'v{version_value}'
-  model_file_name = f'{_VARIANT_TO_MODEL_FILE_NAME_MAP[variant]}.npz'
-  return _MODELS_VERSIONS_DIR / version_dir_name / model_file_name
-
-
 def major_to_newest_full_version(
     major: gnm_specs.GNMMajorVersion,
 ) -> gnm_specs.GNMVersion:
@@ -67,6 +55,31 @@ def full_version_to_major(
   return gnm_specs.GNMMajorVersion(version.value.split('.')[0])
 
 
+def _get_version_dir_name(version: gnm_specs.GNMMajorVersion) -> str:
+  """Returns directory name for version (e.g. 'v3_0')."""
+  version_value = major_to_newest_full_version(version).value.replace('.', '_')
+  return f'v{version_value}'
+
+
+def _get_model_filename(
+    version: gnm_specs.GNMMajorVersion,
+    variant: gnm_specs.GNMVariant,
+) -> str:
+  """Returns filename for model variant (e.g. 'gnm_head.npz')."""
+  del version
+  return f'{_VARIANT_TO_MODEL_FILE_NAME_MAP[variant]}.npz'
+
+
+def _get_model_path_from_version_and_variant(
+    version: gnm_specs.GNMMajorVersion,
+    variant: gnm_specs.GNMVariant,
+) -> epath.Path:
+  """Returns the GNM model runfiles path for given variant and version."""
+  version_dir_name = _get_version_dir_name(version)
+  model_file_name = _get_model_filename(version, variant)
+  return _MODELS_VERSIONS_DIR / version_dir_name / model_file_name
+
+
 @functools.lru_cache
 def load_model_from_runfile(
     version: gnm_specs.GNMMajorVersion, variant: gnm_specs.GNMVariant
@@ -80,18 +93,45 @@ def load_model_from_runfile(
       variant,
       model_file,
   )
+  return _load_model_dict_from_file(model_file, version, variant)
+
+
+def _load_model_dict_from_file(
+    model_file: epath.Path,
+    version: gnm_specs.GNMMajorVersion,
+    variant: gnm_specs.GNMVariant,
+) -> dict[str, Any]:
+  """Loads and standardizes model dict from a local file path."""
   with model_file.open('rb') as f:
     data_dict = dict(np.load(f))
+
+  del version, variant
 
   # Validate the data.
   valid, missing, extra = _validate_gnm_data(data_dict)
   if not valid:
     raise ValueError(
-        f'Validation failed for version {version}, variant {variant}.'
+        f'Validation failed for model from {model_file}.'
         f' Missing: {missing}, Extra: {extra}'
     )
 
   return _standardize_gnm_data_types(data_dict)
+
+
+def get_default_gnm_cache_dir() -> epath.Path:
+  """Returns the default directory for caching downloaded GNM models."""
+  from gnm.shape.oss_data_loaders import oss_data_loaders  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+  return oss_data_loaders.get_default_gnm_cache_dir()
+
+
+def load_model_from_remote(
+    version: gnm_specs.GNMMajorVersion,
+    variant: gnm_specs.GNMVariant,
+    **kwargs: Any,
+) -> dict[str, Any]:
+  """Loads GNM model data from a remote source."""
+  from gnm.shape.oss_data_loaders import oss_data_loaders  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+  return oss_data_loaders.load_model_from_remote(version, variant, **kwargs)
 
 
 def _validate_gnm_data(
@@ -109,9 +149,9 @@ def _validate_gnm_data(
     A tuple of (bool, Sequence[str], Sequence[str]) indicating if the data dict
     has exactly the expected fields, the missing fields and the extra fields.
   """
-  expected_fields = gnm_data_schema.GNM_DATA_ATTRIBUTES
-  missing_fields = list(set(expected_fields) - set(data.keys()))
-  extra_fields = list(set(data.keys()) - set(expected_fields))
+  expected_fields = set(gnm_data_schema.GNM_DATA_ATTRIBUTES)
+  missing_fields = list(expected_fields - set(data.keys()))
+  extra_fields = list(set(data.keys()) - expected_fields)
   return not missing_fields and not extra_fields, missing_fields, extra_fields
 
 

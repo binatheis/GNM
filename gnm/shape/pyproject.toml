@@ -50,8 +50,12 @@ jax = [
 pytorch = [
     "torch",
 ]
+mitsuba = [
+    "drjit",
+    "mitsuba",
+]
 all = [
-    "gnm-shape[jax,pytorch]",
+    "gnm-shape[jax,pytorch,mitsuba]",
 ]
 dev = [
     "pytest",
@@ -66,7 +70,9 @@ packages = [
     "gnm.shape.data",
     "gnm.shape.data.versions",
     "gnm.shape.fitting_utils",
+    "gnm.shape.oss_data_loaders",
     "gnm.shape.visualization",
+    "gnm.shape.visualization.integrators",
 ]
 package-dir = {"gnm.shape" = "."}
 

@@ -65,7 +65,6 @@ class GNM(gnm_base.GNMBase):
   Attributes:
     version: The version of the loaded GNM model.
     variant: The variant of the loaded GNM model.
-    cl_number: The CL used to create this model.
     template_vertex_positions: Vertex positions in the template mesh, (V, 3).
     template_joint_positions: Joint positions in the template GNM, (J, 3).
     vertex_identity_basis: The vertex identity basis of the model, (I, V, 3).
@@ -187,7 +186,6 @@ class GNM(gnm_base.GNMBase):
     field_converters = {
         'version': as_original,
         'variant': as_original,
-        'cl_number': as_original,
         'template_vertex_positions': as_float_array,
         'template_joint_positions': as_float_array,
         'vertex_identity_basis': as_float_array,
@@ -505,7 +503,9 @@ class GNM(gnm_base.GNMBase):
 
   @property
   def skinning_segmentation(self) -> npt.NDArray[np.int32]:
-    return np.array(self.skinning_weights).argmax(axis=0)
+    return np.array(self.skinning_weights).argmax(  # pyrefly: ignore[bad-return]  # pylint: disable=line-too-long
+        axis=0
+    )
 
   @enp.check_and_normalize_arrays(strict=False)
   def vertex_positions_bind_pose(
@@ -741,9 +741,7 @@ def _scatter_indices(keep_vertices, num_vertices, xnp) -> Any:
         - 1
     )
   elif enp.lazy.is_jax_xnp(xnp):
-    # pytype: disable=import-error
-    import jax.numpy as jnp  # pylint: disable=g-import-not-at-top,import-outside-toplevel
-    # pytype: enable=import-error
+    jnp = enp.lazy.jnp
     mapper = jnp.full((num_vertices,), -1, dtype=jnp.int32)
     return mapper.at[keep_vertices].set(
         jnp.arange(len(keep_vertices), dtype=jnp.int32)

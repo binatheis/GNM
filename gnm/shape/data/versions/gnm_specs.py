@@ -32,3 +32,8 @@ class GNMBodyPart(enum.StrEnum):
 GNM_VARIANT_TO_BODY_PART_MAP = {
   GNMVariant.HEAD: GNMBodyPart.HEAD,
 }
+
+class GNMRemoteSource(enum.StrEnum):
+  HTTP = 'http'
+  HUGGING_FACE = 'huggingface'
+  KAGGLE = 'kaggle'
