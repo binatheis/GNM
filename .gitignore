@@ -1,0 +1,7 @@
+
+# Local build artifacts (never commit)
+gnm/shape/build/
+gnm/shape/dist/
+gnm/shape/*.egg-info/
+__pycache__/
+*.py[cod]
