@@ -16,7 +16,7 @@
 
 Usage:
   ```
-  gnm = gnm_tensorflow.GNM.from_local(
+  gnm = gnm_tensorflow.GNM.from_remote(
       version=gnm_tensorflow.GNMMajorVersion.V3,
       variant=gnm_tensorflow.GNMVariant.HEAD,
   )
@@ -34,9 +34,7 @@ Usage:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import dataclasses
-from typing import Any
 
 from absl import logging
 from etils import enp
@@ -50,6 +48,7 @@ GNMMajorVersion = gnm_specs.GNMMajorVersion
 GNMVariant = gnm_specs.GNMVariant
 GNMBodyPart = gnm_specs.GNMBodyPart
 GNMLandmarksType = gnm_landmarks.GNMLandmarksType
+
 GNMRemoteSource = gnm_specs.GNMRemoteSource
 
 
@@ -97,8 +96,10 @@ class GNM(gnm_xnp.GNM):
       3). If they do not exist in the GNM npz, they are set to the identity
       matrix. Note that these are not used to compute the GNM joint and vertex
       positions.
-    quad_uvs: Texture coordinates per quad, (Q, 4, 2).
-    triangle_uvs: Texture coordinates per triangle, (T, 3, 2).
+    quad_uvs: Texture coordinates per quad, (Q, 4, 2). All regions share the
+      unit square and overlap there; prefer `quad_uvs_udim`.
+    triangle_uvs: Texture coordinates per triangle, (T, 3, 2). All regions share
+      the unit square and overlap there; prefer `triangle_uvs_udim`.
     mesh_component_names: The vertex group name corresponding to each separate
       mesh part.
     mirror_indices: The index of each vertex on the other side of the mesh.
@@ -112,6 +113,10 @@ class GNM(gnm_xnp.GNM):
       based on skinning weights.
     edge_list: The quad topology represented as a list of directed edges (E, 2).
     vertex_uvs: Per-vertex UV texture coordinates shaped (V, 2).
+    quad_udim_tiles: The UDIM tile number of each quad, (Q,).
+    triangle_udim_tiles: The UDIM tile number of each triangle, (T,).
+    quad_uvs_udim: Per-quad UDIM texture coordinates, (Q, 4, 2).
+    triangle_uvs_udim: Per-triangle UDIM texture coordinates, (T, 3, 2).
     num_vertices: The number of vertices in the mesh V.
     num_joints: The number of joints in the skeleton J.
     identity_dim: The dimensionality of the linear identity basis I.
@@ -119,12 +124,9 @@ class GNM(gnm_xnp.GNM):
   """
 
   @classmethod
-  def _from_model_data(
-      cls,
-      model_data: Mapping[str, Any],
-  ) -> GNM:
-    """Creates a TensorFlow GNM instance from model data."""
-    return cls._from_model_data_with_xnp(model_data, xnp=enp.lazy.tnp)
+  def _get_np_module(cls) -> enp.NpModule:
+    """Returns the TensorFlow NumPy backend module."""
+    return enp.lazy.tnp
 
   def compute_vertex_normals(
       self,

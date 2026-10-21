@@ -25,6 +25,7 @@ with tools for visualization and semantic sampling of parameters.
 *   **Semantic Parameter Sampling:** Includes pre-trained models to generate identity and expression parameters from semantic labels:
     *   `ExpressionSampler`: Generate expressions like "happy", "surprise", or blend them.
     *   `IdentitySampler`: Generate identities based on attributes like gender and ethnicity.
+*   **UDIM Texture Layout:** Texture coordinates in the standard UDIM layout, with each region of the mesh in its own tile.
 *   **Multi-Framework Support:** Native backend support for **NumPy**, **JAX**, **PyTorch**, and **TensorFlow**.
 *   **Permissive License:** Apache 2.0.
 
@@ -35,8 +36,7 @@ gnm/shape/
 ├── data/                   # GNM model assets and versions
 │   ├── textures/           # Model textures (.jpg, .png)
 │   ├── semantic_sampler/   # Pre-trained .h5 semantic sampling models
-│   └── versions/
-│       └── v3_0/           # Contains v3 GNM model files (.npz)
+│   └── versions/           # Model specifications and catalog definitions
 ├── demos/                  # Interactive demo notebooks (.ipynb)
 ├── fitting_utils/          # Shared optimization helper functions
 ├── visualization/          # Rendering and camera projection utilities
@@ -102,8 +102,9 @@ cd gnm/gnm/shape
 
 ### Loading the GNM Model
 
-The core model can be loaded as follows. The necessary model data (`gnm.npz`)
-is included in this repository.
+The core model can be loaded as follows. Model weights are downloaded
+automatically on first use from remote CDNs (such as Hugging Face Hub or
+Kaggle Models) and cached locally (in `~/.cache/gnm/models/` by default).
 
 ```python
 from gnm.shape import gnm_numpy
@@ -111,8 +112,8 @@ from gnm.shape import semantic_sampler
 import numpy as np
 import trimesh # For visualization
 
-# Load the GNM head model.
-gnm = gnm_numpy.GNM.from_local(
+# Load the GNM head model (automatically downloads from CDN on first run).
+gnm = gnm_numpy.GNM.from_remote(
     version=gnm_numpy.GNMMajorVersion.V3,
     variant=gnm_numpy.GNMVariant.HEAD,
 )
@@ -125,6 +126,16 @@ faces = gnm.triangles
 mesh = trimesh.Trimesh(vertices=template_vertices, faces=faces, process=False)
 # mesh.show()
 mesh.export("template_face.obj")
+```
+
+### Loading a GNM Model from a Custom File
+
+A GNM model can also be loaded from a local `.npz` model file (e.g. one that
+you downloaded manually). The file must contain all the GNM model fields;
+unknown extra fields are ignored with a warning.
+
+```python
+gnm = gnm_numpy.GNM.from_custom_file("/path/to/gnm_head.npz")
 ```
 
 ### Basic Parameter Manipulation
@@ -242,8 +253,14 @@ relevant for the GNM v3.x.
 
 ## Model Data
 The GNM model data (e.g., `gnm_head.npz`) contains the template shape, identity
-basis, expression basis, skinning weights, and UV layout. This file is provided
-within the `gnm/shape/data/versions/v{MAJOR}_{MINOR}` directory.
+basis, expression basis, skinning weights, and UV layout. The model weights are
+hosted on public CDNs (Hugging Face Hub and Kaggle Models) and downloaded via
+`GNM.from_remote(...)`. Downloaded models are cached locally in
+`~/.cache/gnm/models/` (or a custom directory specified via `cache_dir`).
+Loaded models are not cached in memory: every `from_*` call (except `from_gnm`)
+reads the model file again and returns a new, independent instance. To reuse a
+model, keep the returned instance (or create backend conversions from it with
+`from_gnm`).
 
 The Semantic Sampler models
 (`expression_decoder_model.h5`, `identity_decoder_model.h5`) are located
@@ -251,24 +268,113 @@ in `gnm/shape/data/semantic_sampler`.
 
 ## UV Mapping
 
-The GNM head mesh features a structured UV layout divided into five logical
-regions:
+GNM provides texture coordinates for both the quad topology and the
+triangulated topology, in two layouts:
 
-| Region | Description | Vertex Groups |
+| Layout | Quads | Triangles | Status |
+| :--- | :--- | :--- | :--- |
+| **UDIM** | `quad_uvs_udim`, `[Q, 4, 2]` | `triangle_uvs_udim`, `[T, 3, 2]` | **Recommended** |
+| Per-region | `quad_uvs`, `[Q, 4, 2]` | `triangle_uvs`, `[T, 3, 2]` | Legacy |
+
+Both describe the same unwrapping of each region: they differ only in where
+each region sits in the UV plane. The UDIM layout gives every region its own
+tile, whereas the per-region layout stacks all of them in the unit square,
+where they overlap. **Prefer the UDIM coordinates** for all new code; the
+per-region ones are kept for backward compatibility while existing textures
+and pipelines migrate.
+
+### UDIM coordinates
+
+`quad_uvs_udim` and `triangle_uvs_udim` follow the Mari UDIM convention, as
+specified for
+[`UsdUVTexture`](https://openusd.org/release/spec_usdpreviewsurface.html):
+each region is translated into its own tile of the UV plane, and the tile
+whose lower-left corner is at integer coordinate `(u, v)` is numbered
+`1001 + u + 10 * v`. GNM uses tiles `1001`–`1007`, a single row, well within
+the `[1001, 1100]` range that USD stipulates for interchange.
+
+| Tile | Region | Vertex groups |
 | :--- | :--- | :--- |
-| **Skin** | The head and face skin. | `skin` |
-| **Teeth** | Upper and lower teeth and gums. | `upper_teeth_and_gums` / `lower_teeth_and_gums` |
-| **Tongue** | The tongue. | `tongue` |
-| **Eye Interior** | Internal eye structures (sclera, pupil, iris). | `eye_interiors` |
-| **Eye Exterior** | External eye structures (cornea). | `eye_exteriors` |
+| 1001 | Skin: the head and face skin. | `skin` |
+| 1002 | Left eye interior: sclera, pupil and iris. | `left_eye` ∩ `eye_interiors` |
+| 1003 | Left eye exterior: cornea. | `left_eye` ∩ `eye_exteriors` |
+| 1004 | Right eye interior: sclera, pupil and iris. | `right_eye` ∩ `eye_interiors` |
+| 1005 | Right eye exterior: cornea. | `right_eye` ∩ `eye_exteriors` |
+| 1006 | Teeth and gums, upper and lower. | `upper_teeth_and_gums`, `lower_teeth_and_gums` |
+| 1007 | Tongue. | `tongue` |
 
-We provide UV coordinates for both the quad topology (`quad_uvs`, shape
-`[Q, 4, 2]`) and the triangulated topology (`triangle_uvs`, shape `[T, 3, 2]`).
-Left and right eye UVs are mapped to the same UV space regions (overlapping) to
-optimize texture space. Below is the visualization of the edge flow for the quad
-UV map. A similar layout is available for the triangulated version.
+Below is the edge flow of each tile's UV map; a similar layout is available
+for the triangulated topology.
+
+![Quad UV Maps (UDIM)](assets/readme/uv_flow_quads_udim.png)
+
+Every region occupies exactly one tile and no two regions share one, so no
+two surfaces compete for the same texels. The upper and lower teeth share a
+tile because their UV islands interleave without touching. Each eye, on the
+other hand, is split in two, because its interior is unwrapped inside the
+disc of its exterior, as tiles 1002 and 1003 show.
+
+```python
+gnm = gnm_numpy.GNM.from_remote(
+    version=gnm_numpy.GNMMajorVersion.V3,
+    variant=gnm_numpy.GNMVariant.HEAD,
+)
+
+gnm.quad_uvs_udim       # [Q, 4, 2], u spans [0, 7) instead of [0, 1]
+gnm.quad_udim_tiles     # [Q], the tile number of each quad
+gnm.triangle_uvs_udim   # [T, 3, 2]
+gnm.triangle_udim_tiles # [T]
+
+# Recover a face's tile from its coordinates, as a renderer would.
+u, v = gnm.quad_uvs_udim[0, 0]
+tile = 1001 + int(u) + 10 * int(v)
+```
+
+Because each tile is a separate image, tiles may have **different
+resolutions** — a 2048x2048 skin texture alongside 128x128 eyes, for example.
+By convention the files are named with the tile number in place of a `<UDIM>`
+token, so `face.<UDIM>.png` resolves to `face.1001.png`, `face.1002.png` and
+so on. UDIM tile sets are widely supported by DCC tools and renderers, so such
+a set is usually loaded as a single texture without extra work.
+
+The tiles are named by the `gnm_udim.UdimTile` enum (`UdimTile.SKIN`,
+`UdimTile.LEFT_EYE_INTERIOR`, ...; an `IntEnum`, so each compares equal to its
+tile number) and the region of each is exposed as
+`gnm_udim.UDIM_TILE_REGIONS` (from `gnm.shape.gnm_udim`). Variants that do not
+define a region simply omit its tile: `GNMVariant.HAND` has only skin, and so
+only tile 1001.
+
+### Per-region coordinates (legacy)
+
+`quad_uvs` and `triangle_uvs` place **every region in the same unit square**,
+so the regions overlap one another, and the left and right eyes are
+unwrapped onto very nearly the same area. This lets each region be textured
+on its own, one image per region, but nothing in the coordinates says which
+image a face should sample. Taken one region at a time, the maps are the same
+as the UDIM tiles above (a single eye is shown):
 
 ![Quad UV Maps](assets/readme/uv_flow_quads.png)
+
+Overlaid, as a single texture image would see them, they collide:
+
+![Quad UV Maps (per-region)](assets/readme/uv_flow_quads_overlap.png)
+
+> [!WARNING]
+> **A single texture image cannot be applied to `quad_uvs` directly**: the
+> tongue, teeth, eyes and skin would all sample the same texels. Anything that
+> bakes, optimizes or learns a texture must either process one region at a
+> time or, preferably, use the UDIM coordinates above.
+
+Because `quad_uvs_udim` differs from `quad_uvs` only by the integer origin of
+each face's tile, a texture made for one region of the per-region layout is
+already a valid UDIM tile and can be reused by renaming it:
+
+| Per-region texture | UDIM tile(s) |
+| :--- | :--- |
+| Skin | 1001 |
+| Eye, one image for interior and exterior | Copied to 1002 and 1003 for the left eye, 1004 and 1005 for the right |
+| Teeth and gums | 1006 |
+| Tongue | 1007 |
 
 ## Model Limitations in Human Representation
 This model was trained on datasets using binary gender categories and four broad
@@ -289,7 +395,7 @@ To learn more about the technical details including the formal model definition,
 ```bash
 @article{ploumpis2026gnmhead,
   title={GNM Head: A Generative aNthropometric Model of the human head},
-  author={Ploumpis, S. and Bednarik, J. and Zoss, G. and Guseinov, R. and Prasso, L. and Chandran, P. and Boyne, O. and Choutas, V. and Bolkart, T. and Wang, D. and Chai, M. and Qiu, D. and Winberg, S. and Rainer, G. and Bridgeman, L. and Vicini, D. and Riviere, J. and Boetzel, Y. and Koumis, A. and Busch, J. and Herrera, C. and Still, J. and Ysebert, S. and Lincoln, P. and Escolano, S. O. and Rhemann, C. and Wood, E. and Beeler, T. and Zafeiriou, S.},
+  author={Ploumpis, S. and Bednarik, J. and Zoss, G. and Guseinov, R. and Prasso, L. and Chandran, P. and Boyne, O. and Choutas, V. and Bolkart, T. and Wang, D. and Chai, M. and Qiu, D. and Winberg, S. and Rainer, G. and Bridgeman, L. and Helminger, L. and Collins, E. and Vicini, D. and Riviere, J. and Boetzel, Y. and Koumis, A. and Moschoglou, S. and Busch, J. and Herrera, C. and Still, J. and Ysebert, S. and Lincoln, P. and Escolano, S. O. and Rhemann, C. and Wood, E. and Beeler, T. and Zafeiriou, S.},
   year={2026},
   eprint={2607.23687},
   archivePrefix={arXiv},

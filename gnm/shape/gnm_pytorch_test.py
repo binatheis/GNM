@@ -15,6 +15,8 @@
 """Tests for GNM PyTorch implementation."""
 
 from collections.abc import Sequence
+import copy
+import functools
 import itertools
 from typing import Any
 
@@ -23,6 +25,7 @@ from absl.testing import parameterized
 from gnm.shape import gnm_data_schema
 from gnm.shape import gnm_numpy
 from gnm.shape import gnm_pytorch
+from gnm.shape import gnm_test_utils
 from gnm.shape.data.versions import gnm_test_catalog
 import numpy as np
 import torch
@@ -35,7 +38,26 @@ _MAINTAINED_MAJOR_GNM_VERSIONS = gnm_test_catalog.MAINTAINED_MAJOR_VERSIONS
 _MAJOR_VERSION_TO_VARIANTS_MAP = gnm_test_catalog.MAJOR_VERSION_TO_VARIANTS_MAP
 
 
+_VARIANTS_BY_VERSION = {
+    version: [
+        variant
+        for variant in _MAJOR_VERSION_TO_VARIANTS_MAP[version]
+        if variant in _SUPPORTED_VARIANTS
+    ]
+    for version in _MAINTAINED_MAJOR_GNM_VERSIONS
+}
+
+
+def _load_gnm_pytorch(version: str, variant: str) -> gnm_pytorch.GNM:
+  gnm = gnm_test_utils.load_gnm(gnm_pytorch.GNM, version, variant)
+  if torch.cuda.is_available():
+    gnm.cuda()
+  return gnm
+
+
 class GNMPytorchTest(parameterized.TestCase):
+  gnms_np: gnm_test_utils.LazyGNMDict[gnm_numpy.GNM]
+  gnms_pytorch: gnm_test_utils.LazyGNMDict[gnm_pytorch.GNM]
 
   @classmethod
   def setUpClass(cls):
@@ -46,23 +68,25 @@ class GNMPytorchTest(parameterized.TestCase):
     np.random.seed(0)
     torch.random.manual_seed(0)
 
-    cls.gnms_np = {}
-    cls.gnms_pytorch = {}
-    for version in _MAINTAINED_MAJOR_GNM_VERSIONS:
-      cls.gnms_np[version] = {}
-      cls.gnms_pytorch[version] = {}
-      for variant in _MAJOR_VERSION_TO_VARIANTS_MAP[version]:
-        if variant in [v.value for v in _SUPPORTED_VARIANTS]:
-          cls.gnms_np[version][variant] = gnm_numpy.GNM.from_local(
-              gnm_numpy.GNMMajorVersion(version.removeprefix('v')),
-              gnm_numpy.GNMVariant(variant),
-          )
-          cls.gnms_pytorch[version][variant] = gnm_pytorch.GNM.from_local(
-              gnm_pytorch.GNMMajorVersion(version.removeprefix('v')),
-              gnm_pytorch.GNMVariant(variant),
-          )
-          if torch.cuda.is_available():
-            cls.gnms_pytorch[version][variant].cuda()
+    # Load the models on demand, keeping one of each in memory at a time.
+    cls.gnms_np = gnm_test_utils.LazyGNMDict(
+        functools.partial(gnm_test_utils.load_gnm, gnm_numpy.GNM),
+        _VARIANTS_BY_VERSION,
+    )
+    cls.addClassCleanup(cls.gnms_np.clear)
+    cls.gnms_pytorch = gnm_test_utils.LazyGNMDict(
+        _load_gnm_pytorch, _VARIANTS_BY_VERSION
+    )
+    cls.addClassCleanup(cls.gnms_pytorch.clear)
+
+  def _get_pytorch_and_numpy_gnms(
+      self, version: str, variant: str
+  ) -> tuple[gnm_pytorch.GNM, gnm_numpy.GNM]:
+    """Returns the PyTorch and NumPy GNMs, or skips the test if unavailable."""
+    return (
+        self.gnms_pytorch.get_or_skip(version, variant),
+        self.gnms_np.get_or_skip(version, variant),
+    )
 
   def _get_default_kwargs(
       self, gnm_np: gnm_numpy.GNM, n_batch: int = 1, device: str = 'cpu'
@@ -109,11 +133,7 @@ class GNMPytorchTest(parameterized.TestCase):
   )
   def test_properties_match(self, version: str, variant: Any):
     """Tests that important properties match between implementations."""
-    variant_str = variant.value if hasattr(variant, 'value') else variant
-    if variant_str not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant_str} not supported in {version}.')
-    gnm_torch = self.gnms_pytorch[version][variant_str]
-    gnm_np = self.gnms_np[version][variant_str]
+    gnm_torch, gnm_np = self._get_pytorch_and_numpy_gnms(version, variant)
 
     self.assertEqual(gnm_torch.version, gnm_np.version)
     self.assertEqual(gnm_torch.identity_dim, gnm_np.identity_dim)
@@ -127,11 +147,7 @@ class GNMPytorchTest(parameterized.TestCase):
   )
   def test_parity_with_gnm_numpy(self, version: str, variant: Any):
     """Tests that PyTorch GNM poses vertices the same as NumPy GNM."""
-    variant_str = variant.value if hasattr(variant, 'value') else variant
-    if variant_str not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant_str} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant_str]
-    gnm_torch = self.gnms_pytorch[version][variant_str]
+    gnm_torch, gnm_np = self._get_pytorch_and_numpy_gnms(version, variant)
 
     # Build a batch of random parameters.
     n_batch = 10
@@ -158,11 +174,7 @@ class GNMPytorchTest(parameterized.TestCase):
       self, version: str, variant: Any, batch_size: tuple[int, ...]
   ):
     """Tests extracting vertices and landmarks in PyTorch."""
-    variant_str = variant.value if hasattr(variant, 'value') else variant
-    if variant_str not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant_str} not supported in {version}.')
-    gnm_torch = self.gnms_pytorch[version][variant_str]
-    gnm_np = self.gnms_np[version][variant_str]
+    gnm_torch, gnm_np = self._get_pytorch_and_numpy_gnms(version, variant)
 
     parameters_torch = self._get_random_kwargs(
         gnm_np, batch_size, device=self.device
@@ -179,11 +191,7 @@ class GNMPytorchTest(parameterized.TestCase):
   )
   def test_bad_shape(self, version: str, variant: Any):
     """Badly shaped parameter should throw an error."""
-    variant_str = variant.value if hasattr(variant, 'value') else variant
-    if variant_str not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant_str} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant_str]
-    gnm_torch = self.gnms_pytorch[version][variant_str]
+    gnm_torch, gnm_np = self._get_pytorch_and_numpy_gnms(version, variant)
 
     bad_dimension = (
         gnm_torch.expression_dim + gnm_torch.identity_dim + gnm_np.num_joints
@@ -201,11 +209,7 @@ class GNMPytorchTest(parameterized.TestCase):
   )
   def test_bad_shape_joint_transforms(self, version: str, variant: Any):
     """Badly shaped parameter should throw an error."""
-    variant_str = variant.value if hasattr(variant, 'value') else variant
-    if variant_str not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant_str} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant_str]
-    gnm_torch = self.gnms_pytorch[version][variant_str]
+    gnm_torch, gnm_np = self._get_pytorch_and_numpy_gnms(version, variant)
 
     bad_dimension = (
         gnm_torch.expression_dim + gnm_torch.identity_dim + gnm_np.num_joints
@@ -234,11 +238,7 @@ class GNMPytorchTest(parameterized.TestCase):
   )
   def test_joint_transforms_numpy_parity(self, version: str, variant: Any):
     """Test that the joint transformations function matches NumPy."""
-    variant_str = variant.value if hasattr(variant, 'value') else variant
-    if variant_str not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant_str} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant_str]
-    gnm_torch = self.gnms_pytorch[version][variant_str]
+    gnm_torch, gnm_np = self._get_pytorch_and_numpy_gnms(version, variant)
 
     # Build a batch of random parameters.
     n_batch = 10
@@ -269,16 +269,10 @@ class GNMPytorchTest(parameterized.TestCase):
       variant=tuple(_SUPPORTED_VARIANTS),
   )
   def test_prune_vertices(self, version: str, variant: Any):
-    variant_str = variant.value if hasattr(variant, 'value') else variant
-    if variant_str not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant_str} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant_str]
-    gnm_torch = self.gnms_pytorch[version][variant_str]
+    gnm_torch, gnm_np = self._get_pytorch_and_numpy_gnms(version, variant)
 
-    gnm_pruned = gnm_pytorch.GNM.from_local(
-        gnm_pytorch.GNMMajorVersion(version.removeprefix('v')),
-        gnm_pytorch.GNMVariant(variant_str),
-    )
+    # Prune a copy to avoid modifying the cached model for other tests.
+    gnm_pruned = copy.deepcopy(gnm_torch)
 
     keep_vertices = gnm_np.quads[0]
     gnm_pruned.prune_vertices(keep_vertices)
@@ -304,11 +298,7 @@ class GNMPytorchTest(parameterized.TestCase):
   )
   def test_no_batch(self, version: str, variant: Any):
     """Tests we can use Torch GNM without a leading batch dimension."""
-    variant_str = variant.value if hasattr(variant, 'value') else variant
-    if variant_str not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant_str} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant_str]
-    gnm_torch = self.gnms_pytorch[version][variant_str]
+    gnm_torch, gnm_np = self._get_pytorch_and_numpy_gnms(version, variant)
     parameters = {
         k: v[0]
         for k, v in self._get_default_kwargs(gnm_np, device=self.device).items()
@@ -322,11 +312,7 @@ class GNMPytorchTest(parameterized.TestCase):
   )
   def test_omit_all_parameters(self, version: str, variant: Any):
     """If we omit all parameters, Torch GNM should return the template."""
-    variant_str = variant.value if hasattr(variant, 'value') else variant
-    if variant_str not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant_str} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant_str]
-    gnm_torch = self.gnms_pytorch[version][variant_str]
+    gnm_torch, gnm_np = self._get_pytorch_and_numpy_gnms(version, variant)
 
     expected = gnm_np.template_vertex_positions
     actual = gnm_torch().detach().cpu().numpy()
@@ -346,11 +332,7 @@ class GNMPytorchTest(parameterized.TestCase):
       parameter_count: int,
   ):
     """Exercise GNM with various batch dimensions and omitted parameters."""
-    variant_str = variant.value if hasattr(variant, 'value') else variant
-    if variant_str not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant_str} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant_str]
-    gnm_torch = self.gnms_pytorch[version][variant_str]
+    gnm_torch, gnm_np = self._get_pytorch_and_numpy_gnms(version, variant)
 
     parameters = self._get_random_kwargs(gnm_np, batch_dims, device=self.device)
     # Omit some parameters.
@@ -366,11 +348,7 @@ class GNMPytorchTest(parameterized.TestCase):
   def test_vertex_positions_world(
       self, version: str, variant: Any, n_batch: int
   ):
-    variant_str = variant.value if hasattr(variant, 'value') else variant
-    if variant_str not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant_str} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant_str]
-    gnm_torch = self.gnms_pytorch[version][variant_str]
+    gnm_torch, gnm_np = self._get_pytorch_and_numpy_gnms(version, variant)
 
     parameters = self._get_random_kwargs(gnm_np, [n_batch], device=self.device)
 
@@ -407,10 +385,7 @@ class GNMPytorchTest(parameterized.TestCase):
   )
   def test_to_numpy_data_dict(self, version: str, variant: Any):
     """Tests to_numpy_data_dict method."""
-    variant_str = variant.value if hasattr(variant, 'value') else variant
-    if variant_str not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant_str} not supported in {version}.')
-    gnm = self.gnms_pytorch[version][variant_str]
+    gnm = self.gnms_pytorch.get_or_skip(version, variant)
 
     data_dict = gnm.to_numpy_data_dict()
 
@@ -433,19 +408,14 @@ class GNMPytorchTest(parameterized.TestCase):
   )
   def test_from_gnm(self, version: str, variant: Any):
     """Tests from_gnm factory method."""
-    variant_str = variant.value if hasattr(variant, 'value') else variant
-    if variant_str not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant_str} not supported in {version}.')
-    gnm = self.gnms_pytorch[version][variant_str]
+    gnm, gnm_np = self._get_pytorch_and_numpy_gnms(version, variant)
 
     new_gnm = gnm_pytorch.GNM.from_gnm(gnm)
 
     self.assertEqual(new_gnm.version, gnm.version)
     self.assertEqual(new_gnm.variant, gnm.variant)
 
-    parameters = self._get_random_kwargs(
-        self.gnms_np[version][variant_str], batch=[10], device=self.device
-    )
+    parameters = self._get_random_kwargs(gnm_np, batch=[10], device=self.device)
 
     vertices_orig = gnm(**parameters)
     vertices_new = new_gnm(**parameters)
@@ -459,15 +429,16 @@ class GNMPytorchFactoryMethodsTest(parameterized.TestCase):
       variant=tuple(_SUPPORTED_VARIANTS),
       version=gnm_test_catalog.MAINTAINED_MAJOR_VERSIONS,
   )
-  def test_from_local_successful(self, variant, version):
-    if variant.value in gnm_test_catalog.MAJOR_VERSION_TO_VARIANTS_MAP[version]:
+  def test_from_remote_successful(self, variant, version):
+    variants = gnm_test_catalog.MAJOR_VERSION_TO_VARIANTS_MAP[version]
+    if variant.value in variants:
       major_version = gnm_pytorch.GNMMajorVersion(version[1:])
 
-      model = gnm_pytorch.GNM.from_local(major_version, variant)
+      model = gnm_pytorch.GNM.from_remote(major_version, variant)
       self.assertIsInstance(model, gnm_pytorch.GNM)
     else:
       self.skipTest(f'Variant {variant} not available in version {version}')
 
 
 if __name__ == '__main__':
-  absltest.main()
+  absltest.main(testLoader=gnm_test_utils.ModelOrderedTestLoader())

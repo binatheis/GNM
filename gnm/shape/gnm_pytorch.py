@@ -16,7 +16,7 @@
 
 Usage:
   ```
-  gnm = gnm_pytorch.GNM.from_local(
+  gnm = gnm_pytorch.GNM.from_remote(
       version=gnm_pytorch.GNMMajorVersion.V3,
       variant=gnm_pytorch.GNMVariant.HEAD,
   )
@@ -34,11 +34,10 @@ Usage:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import dataclasses
-from typing import Any
 
 from absl import logging
+from etils import enp
 from gnm.shape import gnm_landmarks
 from gnm.shape import gnm_xnp
 from gnm.shape.data.versions import gnm_specs
@@ -49,6 +48,7 @@ GNMMajorVersion = gnm_specs.GNMMajorVersion
 GNMVariant = gnm_specs.GNMVariant
 GNMBodyPart = gnm_specs.GNMBodyPart
 GNMLandmarksType = gnm_landmarks.GNMLandmarksType
+
 GNMRemoteSource = gnm_specs.GNMRemoteSource
 
 
@@ -90,8 +90,10 @@ class GNM(gnm_xnp.GNM, torch.nn.Module):
     skinning_weights: The model's skinning weights, (J, V).
     quads: The mesh topology as quads, (Q, 4).
     triangles: The mesh topology as triangles, (T, 3).
-    quad_uvs: Texture coordinates per quad, (Q, 4, 2).
-    triangle_uvs: Texture coordinates per triangle, (T, 3, 2).
+    quad_uvs: Texture coordinates per quad, (Q, 4, 2). All regions share the
+      unit square and overlap there; prefer `quad_uvs_udim`.
+    triangle_uvs: Texture coordinates per triangle, (T, 3, 2). All regions share
+      the unit square and overlap there; prefer `triangle_uvs_udim`.
     mesh_component_names: The vertex group name corresponding to each separate
       mesh part.
     mirror_indices: The index of each vertex on the other side of the mesh.
@@ -103,10 +105,21 @@ class GNM(gnm_xnp.GNM, torch.nn.Module):
       joint and vertex positions.
     vertex_groups: The weights in each vertex group, (G, V).
     vertex_group_names: The name of each vertex group, (G,).
+    joint_connections: The joint connections of the GNM rig.
+    joint_children_indices: A dictionary that contains the joint indices of the
+      children of each joint.
+    skinning_segmentation: A decomposition of the vertices into separate parts
+      based on skinning weights.
     num_vertices: The number of vertices in the mesh V.
     num_joints: The number of joints in the skeleton J.
     identity_dim: The dimensionality of the linear identity basis I.
     expression_dim: The dimensionality of the linear expression basis E.
+    edge_list: The quad topology represented as a list of directed edges (E, 2).
+    vertex_uvs: Per-vertex UV texture coordinates shaped (V, 2).
+    quad_udim_tiles: The UDIM tile number of each quad, (Q,).
+    triangle_udim_tiles: The UDIM tile number of each triangle, (T,).
+    quad_uvs_udim: Per-quad UDIM texture coordinates, (Q, 4, 2).
+    triangle_uvs_udim: Per-triangle UDIM texture coordinates, (T, 3, 2).
   """
 
   _shape_error_type = RuntimeError
@@ -125,12 +138,9 @@ class GNM(gnm_xnp.GNM, torch.nn.Module):
         self.register_buffer(field.name, val, persistent=False)
 
   @classmethod
-  def _from_model_data(
-      cls,
-      model_data: Mapping[str, Any],
-  ) -> GNM:
-    """Creates a PyTorch GNM instance from model data."""
-    return cls._from_model_data_with_xnp(model_data, xnp=torch)
+  def _get_np_module(cls) -> enp.NpModule:
+    """Returns the PyTorch backend module."""
+    return torch
 
   def compute_vertex_normals(
       self,

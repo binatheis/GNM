@@ -14,6 +14,8 @@
 
 """Tests for GNM TensorFlow implementation."""
 
+import copy
+import functools
 import itertools
 from typing import Any
 
@@ -37,8 +39,20 @@ _MAJOR_VERSION_TO_VARIANTS_MAP = gnm_test_catalog.MAJOR_VERSION_TO_VARIANTS_MAP
 BATCH_DIMS = [tuple(), tuple([1]), tuple([1, 2]), tuple([2, 1, 2])]
 
 
+_VARIANTS_BY_VERSION = {
+    version: [
+        variant
+        for variant in _MAJOR_VERSION_TO_VARIANTS_MAP[version]
+        if variant in _SUPPORTED_VARIANTS
+    ]
+    for version in _MAINTAINED_MAJOR_GNM_VERSIONS
+}
+
+
 class GNMTensorflowTest(parameterized.TestCase):
   rng: np.random.Generator
+  gnms_np: gnm_test_utils.LazyGNMDict[gnm_numpy.GNM]
+  gnms_tf: gnm_test_utils.LazyGNMDict[gnm_tensorflow.GNM]
 
   @classmethod
   def setUpClass(cls):
@@ -47,21 +61,26 @@ class GNMTensorflowTest(parameterized.TestCase):
     cls.rng = np.random.default_rng(0)
     tf.random.set_seed(0)
 
-    cls.gnms_np = {}
-    cls.gnms_tf = {}
-    for version in _MAINTAINED_MAJOR_GNM_VERSIONS:
-      cls.gnms_np[version] = {}
-      cls.gnms_tf[version] = {}
-      for variant in _MAJOR_VERSION_TO_VARIANTS_MAP[version]:
-        if variant in [v.value for v in _SUPPORTED_VARIANTS]:
-          cls.gnms_np[version][variant] = gnm_numpy.GNM.from_local(
-              gnm_numpy.GNMMajorVersion(version.removeprefix('v')),
-              gnm_numpy.GNMVariant(variant),
-          )
-          cls.gnms_tf[version][variant] = gnm_tensorflow.GNM.from_local(
-              gnm_tensorflow.GNMMajorVersion(version.removeprefix('v')),
-              gnm_tensorflow.GNMVariant(variant),
-          )
+    # Load the models on demand, keeping one of each in memory at a time.
+    cls.gnms_np = gnm_test_utils.LazyGNMDict(
+        functools.partial(gnm_test_utils.load_gnm, gnm_numpy.GNM),
+        _VARIANTS_BY_VERSION,
+    )
+    cls.addClassCleanup(cls.gnms_np.clear)
+    cls.gnms_tf = gnm_test_utils.LazyGNMDict(
+        functools.partial(gnm_test_utils.load_gnm, gnm_tensorflow.GNM),
+        _VARIANTS_BY_VERSION,
+    )
+    cls.addClassCleanup(cls.gnms_tf.clear)
+
+  def _get_tensorflow_and_numpy_gnms(
+      self, version: str, variant: str
+  ) -> tuple[gnm_tensorflow.GNM, gnm_numpy.GNM]:
+    """Returns the TF and NumPy GNMs, or skips the test if unavailable."""
+    return (
+        self.gnms_tf.get_or_skip(version, variant),
+        self.gnms_np.get_or_skip(version, variant),
+    )
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
@@ -69,11 +88,7 @@ class GNMTensorflowTest(parameterized.TestCase):
   )
   def test_properties_match(self, version: str, variant: Any):
     """Tests that important properties match between implementations."""
-    variant_str = variant.value if hasattr(variant, 'value') else variant
-    if variant_str not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant_str} not supported in {version}.')
-    gnm_tf = self.gnms_tf[version][variant_str]
-    gnm_np = self.gnms_np[version][variant_str]
+    gnm_tf, gnm_np = self._get_tensorflow_and_numpy_gnms(version, variant)
 
     self.assertEqual(gnm_tf.version, gnm_np.version)
     self.assertEqual(gnm_tf.identity_dim, gnm_np.identity_dim)
@@ -90,10 +105,7 @@ class GNMTensorflowTest(parameterized.TestCase):
       self, version: str, variant: str, batch_dims: tuple[int, ...]
   ):
     """Tests that TensorFlow GNM poses vertices the same as NumPy GNM."""
-    if variant not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant]
-    gnm_tf = self.gnms_tf[version][variant]
+    gnm_tf, gnm_np = self._get_tensorflow_and_numpy_gnms(version, variant)
 
     # Build a batch of random parameters.
     parameters_np = gnm_test_utils.random_gnm_parameters(
@@ -117,10 +129,7 @@ class GNMTensorflowTest(parameterized.TestCase):
       self, version: str, variant: str, batch_dims: tuple[int, ...]
   ):
     """Tests that TensorFlow vertex normals match the NumPy implementation."""
-    if variant not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant]
-    gnm_tf = self.gnms_tf[version][variant]
+    gnm_tf, gnm_np = self._get_tensorflow_and_numpy_gnms(version, variant)
 
     parameters_np = gnm_test_utils.random_gnm_parameters(
         gnm_np, batch_shape=batch_dims, seed=self.rng
@@ -143,11 +152,7 @@ class GNMTensorflowTest(parameterized.TestCase):
       self, version: str, variant: Any, batch_size: tuple[int, ...]
   ):
     """Tests extracting vertices and landmarks in TensorFlow."""
-    variant_str = variant.value if hasattr(variant, 'value') else variant
-    if variant_str not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant_str} not supported in {version}.')
-    gnm_tf = self.gnms_tf[version][variant_str]
-    gnm_np = self.gnms_np[version][variant_str]
+    gnm_tf, gnm_np = self._get_tensorflow_and_numpy_gnms(version, variant)
 
     parameters_np = gnm_test_utils.random_gnm_parameters(
         gnm_np, batch_shape=batch_size, seed=self.rng
@@ -170,15 +175,16 @@ class GNMTensorflowTest(parameterized.TestCase):
   def test_tf_function_behavior(
       self, version: str, variant: str, batch_dims: tuple[int, ...]
   ):
-    if variant not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant]
-    gnm_tf = self.gnms_tf[version][variant]
+    gnm_tf, gnm_np = self._get_tensorflow_and_numpy_gnms(version, variant)
 
     # Build a batch of random parameters.
-    gnm_tf_parameters = gnm_test_utils.random_gnm_parameters(
+    parameters_np = gnm_test_utils.random_gnm_parameters(
         gnm_np, batch_shape=batch_dims, seed=self.rng
     )
+    gnm_tf_parameters = {
+        k: tf.convert_to_tensor(v, dtype=tf.float32)
+        for k, v in parameters_np.items()
+    }
 
     desired = gnm_tf(**gnm_tf_parameters)
 
@@ -206,10 +212,7 @@ class GNMTensorflowTest(parameterized.TestCase):
   )
   def test_bad_shape(self, version: str, variant: str):
     """Badly shaped parameter should throw an error."""
-    if variant not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant]
-    gnm_tf = self.gnms_tf[version][variant]
+    gnm_tf, gnm_np = self._get_tensorflow_and_numpy_gnms(version, variant)
 
     bad_dimension = (
         gnm_tf.expression_dim + gnm_tf.identity_dim + gnm_np.num_joints
@@ -229,10 +232,7 @@ class GNMTensorflowTest(parameterized.TestCase):
   )
   def test_bad_shape_joint_transforms(self, version: str, variant: str):
     """Badly shaped parameter should throw an error."""
-    if variant not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant]
-    gnm_tf = self.gnms_tf[version][variant]
+    gnm_tf, gnm_np = self._get_tensorflow_and_numpy_gnms(version, variant)
 
     bad_dimension = (
         gnm_tf.expression_dim + gnm_tf.identity_dim + gnm_np.num_joints
@@ -265,10 +265,7 @@ class GNMTensorflowTest(parameterized.TestCase):
       self, version: str, variant: str, batch_dims: tuple[int, ...]
   ):
     """Test that the joint transformations function matches NumPy."""
-    if variant not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant]
-    gnm_tf = self.gnms_tf[version][variant]
+    gnm_tf, gnm_np = self._get_tensorflow_and_numpy_gnms(version, variant)
 
     # Build a batch of random parameters.
     parameters_np = gnm_test_utils.random_gnm_parameters(
@@ -308,30 +305,28 @@ class GNMTensorflowTest(parameterized.TestCase):
       variant=tuple(_SUPPORTED_VARIANTS),
   )
   def test_prune_vertices(self, version: str, variant: str):
-    if variant not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant]
-    gnm_tf = self.gnms_tf[version][variant]
+    gnm_tf, gnm_np = self._get_tensorflow_and_numpy_gnms(version, variant)
 
-    gnm_pruned = gnm_tensorflow.GNM.from_local(
-        gnm_tensorflow.GNMMajorVersion(version.removeprefix('v')),
-        gnm_tensorflow.GNMVariant(variant),
-    )
+    # Prune a deep copy to avoid modifying the cached model for other tests: a
+    # shallow copy would share its landmark and topology caches.
+    gnm_pruned = copy.deepcopy(gnm_tf)
 
     keep_vertices = gnm_np.quads[0]
     gnm_pruned.prune_vertices(keep_vertices)
 
     # Build a batch of random parameters.
     n_batch = 10
-    gnm_tf_parameters = gnm_test_utils.random_gnm_parameters(
+    parameters_np = gnm_test_utils.random_gnm_parameters(
         gnm_np, batch_shape=(n_batch,), seed=self.rng
     )
+    gnm_tf_parameters = {
+        k: tf.convert_to_tensor(v, dtype=tf.float32)
+        for k, v in parameters_np.items()
+    }
 
     vertices_tf = gnm_tf(**gnm_tf_parameters)
     vertices_gathered = tf.gather(vertices_tf, keep_vertices, axis=1)
-    vertices_pruned = gnm_pruned(
-        **gnm_tf_parameters  # pyrefly: ignore[bad-argument-type]
-    )
+    vertices_pruned = gnm_pruned(**gnm_tf_parameters)
 
     with self.subTest('Test number of vertices'):
       self.assertLen(keep_vertices, gnm_pruned.num_vertices)
@@ -354,12 +349,9 @@ class GNMTensorflowTest(parameterized.TestCase):
   )
   def test_no_batch(self, version: str, variant: str):
     """Tests we can use TF GNM without a leading batch dimension."""
-    if variant not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant]
-    gnm_tf = self.gnms_tf[version][variant]
+    gnm_tf, gnm_np = self._get_tensorflow_and_numpy_gnms(version, variant)
     parameters = {
-        k: v[0]
+        k: tf.convert_to_tensor(v[0], dtype=tf.float32)
         for k, v in gnm_test_utils.random_gnm_parameters(
             gnm_np, batch_shape=(1,), seed=self.rng
         ).items()
@@ -373,10 +365,7 @@ class GNMTensorflowTest(parameterized.TestCase):
   )
   def test_omit_all_parameters(self, version: str, variant: str):
     """If we omit all parameters, TF GNM should return the template."""
-    if variant not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant]
-    gnm_tf = self.gnms_tf[version][variant]
+    gnm_tf, gnm_np = self._get_tensorflow_and_numpy_gnms(version, variant)
 
     expected = gnm_np.template_vertex_positions
     actual = gnm_tf().numpy()
@@ -396,14 +385,15 @@ class GNMTensorflowTest(parameterized.TestCase):
       parameter_count: int,
   ):
     """Exercise GNM with various batch dimensions and omitted parameters."""
-    if variant not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant]
-    gnm_tf = self.gnms_tf[version][variant]
+    gnm_tf, gnm_np = self._get_tensorflow_and_numpy_gnms(version, variant)
 
-    parameters = gnm_test_utils.random_gnm_parameters(
+    parameters_np = gnm_test_utils.random_gnm_parameters(
         gnm_np, batch_shape=batch_dims, seed=self.rng
     )
+    parameters = {
+        k: tf.convert_to_tensor(v, dtype=tf.float32)
+        for k, v in parameters_np.items()
+    }
     # Omit some parameters.
     for keys in itertools.combinations(parameters, parameter_count):
       sub_parameters = {k: parameters[k] for k in keys}
@@ -417,10 +407,7 @@ class GNMTensorflowTest(parameterized.TestCase):
   def test_vertex_positions_world(
       self, version: str, variant: str, batch_dims: tuple[int, ...]
   ):
-    if variant not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms_np[version][variant]
-    gnm_tf = self.gnms_tf[version][variant]
+    gnm_tf, gnm_np = self._get_tensorflow_and_numpy_gnms(version, variant)
 
     parameters = gnm_test_utils.random_gnm_parameters(
         gnm_np, batch_shape=batch_dims, seed=self.rng
@@ -457,10 +444,7 @@ class GNMTensorflowTest(parameterized.TestCase):
   )
   def test_to_numpy_data_dict(self, version: str, variant: Any):
     """Tests to_numpy_data_dict method."""
-    variant_str = variant.value if hasattr(variant, 'value') else variant
-    if variant_str not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant_str} not supported in {version}.')
-    gnm = self.gnms_tf[version][variant_str]
+    gnm = self.gnms_tf.get_or_skip(version, variant)
 
     data_dict = gnm.to_numpy_data_dict()
 
@@ -483,19 +467,14 @@ class GNMTensorflowTest(parameterized.TestCase):
   )
   def test_from_gnm(self, version: str, variant: Any):
     """Tests from_gnm factory method."""
-    variant_str = variant.value if hasattr(variant, 'value') else variant
-    if variant_str not in self.gnms_np[version]:
-      self.skipTest(f'variant {variant_str} not supported in {version}.')
-    gnm = self.gnms_tf[version][variant_str]
+    gnm, gnm_np = self._get_tensorflow_and_numpy_gnms(version, variant)
 
     new_gnm = gnm_tensorflow.GNM.from_gnm(gnm)
 
     self.assertEqual(new_gnm.version, gnm.version)
     self.assertEqual(new_gnm.variant, gnm.variant)
 
-    parameters = gnm_test_utils.random_gnm_parameters(
-        self.gnms_np[version][variant_str], seed=self.rng
-    )
+    parameters = gnm_test_utils.random_gnm_parameters(gnm_np, seed=self.rng)
     parameters_tf = {
         k: tf.convert_to_tensor(v, dtype=tf.float32)
         for k, v in parameters.items()
@@ -514,15 +493,16 @@ class GNMTensorflowFactoryMethodsTest(parameterized.TestCase):
       variant=list(_SUPPORTED_VARIANTS),
       version=gnm_test_catalog.MAINTAINED_MAJOR_VERSIONS,
   )
-  def test_from_local_successful(self, variant, version):
-    if variant.value in gnm_test_catalog.MAJOR_VERSION_TO_VARIANTS_MAP[version]:
+  def test_from_remote_successful(self, variant, version):
+    variants = gnm_test_catalog.MAJOR_VERSION_TO_VARIANTS_MAP[version]
+    if variant.value in variants:
       major_version = gnm_tensorflow.GNMMajorVersion(version[1:])
 
-      model = gnm_tensorflow.GNM.from_local(major_version, variant)
+      model = gnm_tensorflow.GNM.from_remote(major_version, variant)
       self.assertIsInstance(model, gnm_tensorflow.GNM)
     else:
       self.skipTest(f'Variant {variant} not available in version {version}')
 
 
 if __name__ == '__main__':
-  absltest.main()
+  absltest.main(testLoader=gnm_test_utils.ModelOrderedTestLoader())

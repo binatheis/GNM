@@ -53,12 +53,10 @@ class TestProjectPointsForGNM(parameterized.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    cls.gnms = {}
-    for version in gnm_test_catalog.MAINTAINED_MAJOR_VERSIONS:
-      cls.gnms[version] = gnm_numpy.GNM.from_local(
-          gnm_numpy.GNMMajorVersion(version.removeprefix('v')),
-          gnm_numpy.GNMVariant.HEAD,
-      )
+    cls.gnms = {
+        version: render_gnm_test_base.load_head_gnm(version)
+        for version in gnm_test_catalog.MAINTAINED_MAJOR_VERSIONS
+    }
 
   def setUp(self):
     super().setUp()
@@ -108,11 +106,11 @@ class TestProjectPointsForGNM(parameterized.TestCase):
 
     with self.subTest('Face joints in mask'):
       x, y = joints_image.T.astype(np.int32)
-      self.assertTrue(mask[y, x].all())  # pyrefly: ignore[bad-index]
+      self.assertTrue(mask[y, x].all())
 
     with self.subTest('Point above face not in mask'):
       x, y = external_point_image.T.astype(np.int32)
-      self.assertFalse(mask[y, x].all())  # pyrefly: ignore[bad-index]
+      self.assertFalse(mask[y, x].all())
 
     # Draw points on the image and save.
     image = (image * 255).astype(np.uint8)
@@ -161,7 +159,7 @@ class TestProjectPointsForGNM(parameterized.TestCase):
         x = joints_image[..., 0].astype(np.int32)
         y = joints_image[..., 1].astype(np.int32)
         for i in range(spin_period):
-          is_in_mask = mask[i, y[i], x[i]].all()  # pyrefly: ignore[bad-index]
+          is_in_mask = mask[i, y[i], x[i]].all()
           self.assertTrue(is_in_mask)
 
     # Draw points on the image and save.

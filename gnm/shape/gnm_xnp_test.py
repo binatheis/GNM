@@ -17,11 +17,21 @@
 from __future__ import annotations
 
 import dataclasses
+import typing
 
 from absl.testing import absltest
 from gnm.shape import gnm_data_schema
 from gnm.shape import gnm_numpy
+from gnm.shape import gnm_testing_factory_mixins
 from gnm.shape import gnm_xnp
+import numpy as np
+
+
+class PlaceholderGNM(
+    gnm_testing_factory_mixins.GNMTestingFactoryMethodsMixin,
+    gnm_numpy.GNM,
+):
+  """Concrete GNM subclass with testing factory methods."""
 
 
 class GNMXnpTest(absltest.TestCase):
@@ -38,16 +48,56 @@ class GNMXnpTest(absltest.TestCase):
 
   def test_cannot_instantiate_abstract_gnm(self):
     with self.assertRaises(TypeError):
-      gnm_xnp.GNM()  # pytype: disable=not-instantiable,missing-parameter  # pylint: disable=abstract-class-instantiated
-
-  def test_from_model_data_raises_not_implemented(self):
-    with self.assertRaises(NotImplementedError):
-      gnm_xnp.GNM._from_model_data({})  # pylint: disable=protected-access
+      gnm_xnp.GNM()  # pylint: disable=abstract-class-instantiated  # pyrefly: ignore[bad-instantiation]
 
   def test_cannot_instantiate_concrete_gnm_via_constructor(self):
     with self.assertRaises(TypeError):
-      gnm_numpy.GNM()  # pytype: disable=not-instantiable,missing-parameter
+      PlaceholderGNM()
+
+  def test_to_numpy_data_dict_does_not_share_memory_with_instance(self):
+    gnm = PlaceholderGNM.from_placeholder()
+    data_dict = gnm.to_numpy_data_dict()
+
+    data_dict['template_vertex_positions'][0, 0] = 1.0
+    data_dict['quads'][0, 0] = 1
+    data_dict['joint_parent_indices'][0] = 1
+    data_dict['joint_names'].append('joint2')
+    data_dict['vertex_group_names'].append('group2')
+
+    np.testing.assert_array_equal(
+        gnm.template_vertex_positions, np.zeros((1, 3))
+    )
+    np.testing.assert_array_equal(gnm.quads, np.zeros((1, 4)))
+    np.testing.assert_array_equal(gnm.joint_parent_indices, [0])
+    self.assertEqual(gnm.joint_names, ['joint1'])
+    self.assertEqual(gnm.vertex_group_names, ['group1'])
+
+  def test_from_gnm_does_not_share_memory_with_source_instance(self):
+    source = PlaceholderGNM.from_placeholder()
+    gnm = PlaceholderGNM.from_gnm(source)
+
+    gnm.template_vertex_positions[0, 0] = 1.0
+    gnm.quads[0, 0] = 1
+    typing.cast(list[str], gnm.joint_names).append('joint2')
+    source.template_joint_positions[0, 0] = 1.0
+    typing.cast(list[str], source.vertex_group_names).append('group2')
+
+    np.testing.assert_array_equal(
+        source.template_vertex_positions, np.zeros((1, 3))
+    )
+    np.testing.assert_array_equal(source.quads, np.zeros((1, 4)))
+    self.assertEqual(source.joint_names, ['joint1'])
+    np.testing.assert_array_equal(
+        gnm.template_joint_positions, np.zeros((1, 3))
+    )
+    self.assertEqual(gnm.vertex_group_names, ['group1'])
+
+  def test_from_model_data_fails_for_invalid_data(self):
+    with self.assertRaisesRegex(
+        ValueError, 'Validation failed for GNM model data'
+    ):
+      PlaceholderGNM.from_placeholder(extra_field='invalid')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
   absltest.main()

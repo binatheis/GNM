@@ -33,9 +33,6 @@ from gnm.shape.data.versions import gnm_test_catalog
 from gnm.shape.oss_data_loaders import oss_data_loaders
 import numpy as np
 
-_MAINTAINED_MAJOR_GNM_VERSIONS = gnm_test_catalog.MAINTAINED_MAJOR_VERSIONS
-_MAJOR_VERSION_TO_VARIANTS_MAP = gnm_test_catalog.MAJOR_VERSION_TO_VARIANTS_MAP
-
 
 def _get_dummy_gnm_data_dict() -> dict[str, Any]:
   """Returns a dummy GNM data dictionary."""
@@ -81,39 +78,71 @@ class GNMDataTest(parameterized.TestCase):
       print(f'  {version.name}: {version.value}')
 
 
-class GNMModelLoadingTest(parameterized.TestCase):
-  """Tests for loading GNM model files."""
+class GNMCustomFileLoadingTest(parameterized.TestCase):
+  """Tests for loading GNM model data from custom files."""
 
   def setUp(self):
     super().setUp()
-    gnm_data_loader.load_model_from_runfile.cache_clear()
+    self.temp_dir = epath.Path(self.create_tempdir().full_path)
 
-  @parameterized.product(
-      version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=gnm_test_catalog.ALL_VARIANTS,
+  def _write_model(self, name: str = 'model.npz', **overrides) -> epath.Path:
+    """Writes a valid dummy GNM model file, optionally overriding fields."""
+    local_path = self.temp_dir / name
+    np.savez(local_path, **(_get_dummy_gnm_data_dict() | overrides))
+    return local_path
+
+  @parameterized.named_parameters(
+      ('path', epath.Path),
+      ('str', str),
   )
-  def test_load_model_from_runfile_successful(self, version, variant):
-    if variant in _MAJOR_VERSION_TO_VARIANTS_MAP[version]:
-      # Convert string version/variant to Enums.
-      major_version = gnm_specs.GNMMajorVersion(version[1:])
-      gnm_variant = gnm_specs.GNMVariant(variant)
+  def test_load_model_from_custom_file_successful(self, path_type):
+    """Exercises successful load_model_from_custom_file."""
+    local_path = self._write_model()
 
-      data = gnm_data_loader.load_model_from_runfile(major_version, gnm_variant)
-      self.assertIsInstance(data, dict)
-    else:
-      self.skipTest(f'Variant {variant} not available in version {version}')
+    data = gnm_data_loader.load_model_from_custom_file(path_type(local_path))
 
-  def test_load_model_from_runfile_fails_when_file_not_found(self):
-    with mock.patch.object(
-        gnm_data_loader,
-        '_get_model_path_from_version_and_variant',
-        return_value=epath.Path('/non/existent/model/file.npz'),
+    self.assertIsInstance(data, dict)
+    self.assertEqual(data['version'], gnm_specs.GNMVersion('3.0'))
+    self.assertEqual(data['variant'], gnm_specs.GNMVariant.HEAD)
+
+  def test_load_model_from_custom_file_retains_extra_fields(self):
+    local_path = self._write_model(extra_field=np.zeros((1,)))
+
+    data = gnm_data_loader.load_model_from_custom_file(local_path)
+
+    self.assertIn('extra_field', data)
+
+  def test_load_model_from_custom_file_rereads_changed_file(self):
+    """A model file that changed on disk is read again, not served stale."""
+    local_path = self._write_model(joint_names=['joint1'])
+    data1 = gnm_data_loader.load_model_from_custom_file(local_path)
+
+    self._write_model(joint_names=['new_joint'])
+    data2 = gnm_data_loader.load_model_from_custom_file(local_path)
+
+    self.assertEqual(data1['joint_names'], ['joint1'])
+    self.assertEqual(data2['joint_names'], ['new_joint'])
+
+  def test_load_model_from_custom_file_fails_when_file_not_found(self):
+    with self.assertRaisesRegex(ValueError, 'not found'):
+      gnm_data_loader.load_model_from_custom_file(
+          self.temp_dir / 'non_existent.npz'
+      )
+
+  def test_load_model_from_custom_file_fails_for_missing_fields(self):
+    local_path = self.temp_dir / 'invalid_model.npz'
+    np.savez(local_path, some_key='some_value')
+
+    with self.assertRaisesRegex(
+        ValueError, 'Required attribute version not found in GNM data'
     ):
-      with self.assertRaises(FileNotFoundError):
-        gnm_data_loader.load_model_from_runfile(
-            gnm_specs.GNMMajorVersion.V3,
-            gnm_specs.GNMVariant.HEAD,
-        )
+      gnm_data_loader.load_model_from_custom_file(local_path)
+
+  def test_load_model_from_custom_file_fails_for_unknown_version(self):
+    local_path = self._write_model(version='99.0')
+
+    with self.assertRaisesRegex(ValueError, 'Unknown GNM version: 99.0'):
+      gnm_data_loader.load_model_from_custom_file(local_path)
 
 
 class GNMRemoteModelLoadingTest(parameterized.TestCase):

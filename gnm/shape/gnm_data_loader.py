@@ -14,28 +14,24 @@
 
 """GNM data loader."""
 
-from collections.abc import Sequence
-import functools
+import io
 from typing import Any
 
-from absl import logging
 from etils import epath
-from gnm.shape import gnm_data_schema
 from gnm.shape.data.versions import gnm_models_catalog
 from gnm.shape.data.versions import gnm_specs
 import numpy as np
 
-_pkg = __package__ or 'gnm.shape'
-_MODELS_VERSIONS_DIR = epath.resource_path(f'{_pkg}.data.versions')
+
+
+# `load_model_from_remote`, `load_model_from_custom_file`) into separate
+# modules to reduce the number of copybara strips in this file.
 _VARIANT_TO_MODEL_FILE_NAME_MAP = (
     gnm_models_catalog.VARIANT_TO_MODEL_FILE_NAME_MAP
 )
 
-
-class GNMModelDataNotLinkedError(Exception):
-  """Raised when a GNM model data is not linked into the binary."""
-
-  pass
+_pkg = __package__ or 'gnm.shape'
+_MODELS_VERSIONS_DIR = epath.resource_path(f'{_pkg}.data.versions')
 
 
 def major_to_newest_full_version(
@@ -70,30 +66,28 @@ def _get_model_filename(
   return f'{_VARIANT_TO_MODEL_FILE_NAME_MAP[variant]}.npz'
 
 
-def _get_model_path_from_version_and_variant(
+def get_packaged_model_path(
     version: gnm_specs.GNMMajorVersion,
     variant: gnm_specs.GNMVariant,
 ) -> epath.Path:
-  """Returns the GNM model runfiles path for given variant and version."""
-  version_dir_name = _get_version_dir_name(version)
-  model_file_name = _get_model_filename(version, variant)
-  return _MODELS_VERSIONS_DIR / version_dir_name / model_file_name
+  """Returns the path of a model file shipped inside the wheel.
 
+  Fork of google/GNM: the AudioRig wheel bundles `data/**/*.npz` so that
+  `from_local()` keeps working offline, even though upstream removed the model
+  files from the package in favor of `from_remote()` downloads.
 
-@functools.lru_cache
-def load_model_from_runfile(
-    version: gnm_specs.GNMMajorVersion, variant: gnm_specs.GNMVariant
-) -> dict[str, Any]:
-  """Loads GNM model data from a runfile for the given version/variant."""
-  model_file = _get_model_path_from_version_and_variant(version, variant)
+  Args:
+    version: GNM major version.
+    variant: GNM model variant.
 
-  logging.info(
-      'Loading GNM model version %s, variant %s from runfiles: %s',
-      version,
-      variant,
-      model_file,
+  Returns:
+    The path to the packaged .npz model file.
+  """
+  return (
+      _MODELS_VERSIONS_DIR
+      / _get_version_dir_name(version)
+      / _get_model_filename(version, variant)
   )
-  return _load_model_dict_from_file(model_file, version, variant)
 
 
 def _load_model_dict_from_file(
@@ -102,18 +96,9 @@ def _load_model_dict_from_file(
     variant: gnm_specs.GNMVariant,
 ) -> dict[str, Any]:
   """Loads and standardizes model dict from a local file path."""
-  with model_file.open('rb') as f:
-    data_dict = dict(np.load(f))
+  data_dict = _load_npz_bytes(model_file.read_bytes())
 
   del version, variant
-
-  # Validate the data.
-  valid, missing, extra = _validate_gnm_data(data_dict)
-  if not valid:
-    raise ValueError(
-        f'Validation failed for model from {model_file}.'
-        f' Missing: {missing}, Extra: {extra}'
-    )
 
   return _standardize_gnm_data_types(data_dict)
 
@@ -132,27 +117,40 @@ def load_model_from_remote(
   """Loads GNM model data from a remote source."""
   from gnm.shape.oss_data_loaders import oss_data_loaders  # pylint: disable=g-import-not-at-top,import-outside-toplevel
   return oss_data_loaders.load_model_from_remote(version, variant, **kwargs)
-
-
-def _validate_gnm_data(
-    data: dict[str, Any],
-) -> tuple[bool, Sequence[str], Sequence[str]]:
-  """Validates the GNM data dict.
-
-  It returns any extra or missing fields and a boolean indicating if the data
-  dict has exactly the expected fields.
+def load_model_from_custom_file(
+    model_file: epath.PathLike,
+) -> dict[str, Any]:
+  """Loads GNM model data from a custom file path.
 
   Args:
-    data: The GNM data dict to validate.
+    model_file: The path to the GNM model file (.npz) as Path or str.
 
   Returns:
-    A tuple of (bool, Sequence[str], Sequence[str]) indicating if the data dict
-    has exactly the expected fields, the missing fields and the extra fields.
+    A dictionary of GNM data.
+
+  Raises:
+    ValueError: If the file does not exist, if required fields are missing
+      during type standardization, or if its version or variant is unknown.
   """
-  expected_fields = set(gnm_data_schema.GNM_DATA_ATTRIBUTES)
-  missing_fields = list(expected_fields - set(data.keys()))
-  extra_fields = list(set(data.keys()) - expected_fields)
-  return not missing_fields and not extra_fields, missing_fields, extra_fields
+  model_file = epath.Path(model_file)
+  if not model_file.exists():
+    raise ValueError(f'The GNM model file "{model_file}" not found.')
+
+  return _load_custom_gnm_data_from_bytes(model_file.read_bytes())
+
+
+def _load_npz_bytes(model_bytes: bytes) -> dict[str, Any]:
+  """Loads the content of an .npz model file into a dict of arrays."""
+  with io.BytesIO(model_bytes) as f:
+    return dict(np.load(f))
+
+
+def _load_custom_gnm_data_from_bytes(
+    model_bytes: bytes,
+) -> dict[str, Any]:
+  """Loads and standardizes custom GNM model content."""
+  data_dict = _load_npz_bytes(model_bytes)
+  return _standardize_gnm_data_types(data_dict)
 
 
 def _standardize_gnm_data_types(data: dict[str, Any]) -> dict[str, Any]:

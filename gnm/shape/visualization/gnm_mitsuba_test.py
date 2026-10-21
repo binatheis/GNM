@@ -19,6 +19,7 @@ from typing import Any
 from absl.testing import absltest
 from absl.testing import parameterized
 from gnm.shape import gnm_numpy
+from gnm.shape import gnm_test_utils
 from gnm.shape.data.versions import gnm_test_catalog
 from gnm.shape.visualization import gnm_mitsuba
 import mitsuba as mi
@@ -40,9 +41,8 @@ class GNMMitsubaTest(parameterized.TestCase):
     if not mi.variant():
       mi.set_variant('cuda_ad_rgb', 'llvm_ad_rgb')
     cls.gnms = {
-        version: gnm_numpy.GNM.from_local(
-            gnm_numpy.GNMMajorVersion(version.removeprefix('v')),
-            gnm_numpy.GNMVariant.HEAD,
+        version: gnm_test_utils.load_gnm(
+            gnm_numpy.GNM, version, gnm_numpy.GNMVariant.HEAD
         )
         for version in _MAINTAINED_MAJOR_GNM_VERSIONS
     }
@@ -124,10 +124,10 @@ class GNMMitsubaTest(parameterized.TestCase):
       )
     else:
       self.assertTrue(
-          mesh.has_normals()  # pyrefly: ignore[missing-attribute]
+          mesh.has_normals()
       )
       self.assertTrue(
-          mesh.has_texcoords()  # pyrefly: ignore[missing-attribute]
+          mesh.has_texcoords()
       )
     self.assertTrue(mesh.has_attribute('vertex_colors'))
 
@@ -162,7 +162,7 @@ class GNMMitsubaTest(parameterized.TestCase):
       )
     else:
       self.assertTrue(
-          mesh.has_normals()  # pyrefly: ignore[missing-attribute]
+          mesh.has_normals()
       )
 
   def test_create_mitsuba_mesh_no_colors(self):

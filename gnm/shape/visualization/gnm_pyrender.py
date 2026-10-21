@@ -12,8 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Render a GNM mesh with pyrender."""
+"""Render a GNM mesh with pyrender.
 
+This is the rendering backend of `render_gnm`, which prepares and batches its
+arguments; call `render_gnm.render_gnm` rather than `render` directly.
+"""
+
+import collections.abc
 import functools
 import os
 import tempfile
@@ -22,13 +27,19 @@ import cv2
 import numpy as np
 import tqdm
 
-os.environ['PYOPENGL_PLATFORM'] = 'osmesa'
-import pyrender  # pylint: disable=wrong-import-position
+if 'PYOPENGL_PLATFORM' not in os.environ:
+  os.environ['PYOPENGL_PLATFORM'] = 'osmesa'
+import pyrender  # pylint: disable=wrong-import-position,ungrouped-imports
 
 # Light direction for shading, in camera-space.
 
 _LIGHT_DIRECTION = np.ones([3], dtype=np.float32)
 _LIGHT_INTENSITY = 3.34  # Empirically chosen.
+
+# Transparent black background for correct alpha blending.
+_BLACK = (0.0, 0.0, 0.0, 0.0)
+
+DEFAULT_RENDERER_FACTORY = pyrender.OffscreenRenderer
 
 
 class ProjectionMatrixCamera(pyrender.Camera):
@@ -84,6 +95,9 @@ def render(
     alpha: float = 1.0,
     include_shading: bool = True,
     verbose: bool = False,
+    renderer_factory: (
+        collections.abc.Callable[[int, int], pyrender.OffscreenRenderer]
+    ) = DEFAULT_RENDERER_FACTORY,
 ) -> np.ndarray:
   """Render GNM meshes.
 
@@ -107,6 +121,8 @@ def render(
       blending with the background color.
     include_shading: If False, disable shading in render.
     verbose: Whether to print progress bars.
+    renderer_factory: Optional factory function returning a
+      pyrender.OffscreenRenderer.
 
   Returns:
     The rendered color image, float32 [0-1] (H, W, 3).
@@ -126,7 +142,7 @@ def render(
         for part in part_names
     }
 
-  scene = pyrender.Scene()
+  scene = pyrender.Scene(bg_color=_BLACK)
 
   def _create_texture(frame: int, part: str) -> pyrender.Texture:
     return pyrender.Texture(source=texture[part][frame], source_channels='RGB')
@@ -177,7 +193,7 @@ def render(
   )
   scene.add(light, pose=light_pose_camera, parent_node=camera_node)
 
-  renderer = pyrender.OffscreenRenderer(render_width, render_height)
+  renderer = renderer_factory(render_width, render_height)
   flags = pyrender.constants.RenderFlags.NONE
 
   if include_shading:

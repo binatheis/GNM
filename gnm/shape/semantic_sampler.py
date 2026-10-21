@@ -559,7 +559,7 @@ class IdentitySampler:
 
     The dictionary contains mappings for 'gender' and 'ethnicity'.
     """
-    return {  # pyrefly: ignore[bad-return]
+    return {
         # pyrefly: ignore[bad-assignment]
         'gender': self._GENDER_LABEL_MAP,
         # pyrefly: ignore[bad-assignment]

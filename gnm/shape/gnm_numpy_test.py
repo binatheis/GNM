@@ -18,28 +18,33 @@
 
 from collections.abc import Sequence
 import copy
+import functools
 import itertools
 import re
+import time
 
 from absl.testing import absltest
 from absl.testing import parameterized
 from gnm.shape import gnm_data_schema
 from gnm.shape import gnm_numpy
+from gnm.shape import gnm_test_utils
+from gnm.shape import gnm_udim
 from gnm.shape import gnm_utils
 from gnm.shape.data.versions import gnm_test_catalog
 import numpy as np
 from scipy.spatial import transform as transform_module
-
-try:
-  from tensorflow_graphics.geometry.representation.mesh import normals as tf_normals
-except ImportError:
-  tf_normals = None
 import trimesh
 from trimesh import transformations
 
-_SUPPORTED_VARIANTS = frozenset([
+_GEOMETRY_ONLY_VARIANTS = frozenset([
     gnm_numpy.GNMVariant.HEAD,
 ])
+
+# The UDIM tile assignment must hold on every variant, not only on the ones
+# the rest of this file exercises, so the UDIM tests also cover these.
+_UDIM_ONLY_VARIANTS = frozenset([
+])
+_ALL_SUPPORTED_VARIANTS = _GEOMETRY_ONLY_VARIANTS | _UDIM_ONLY_VARIANTS
 
 _Rotation = transform_module.Rotation
 
@@ -48,6 +53,18 @@ _INVALID_SUFFIXES = []
 
 _MAINTAINED_MAJOR_GNM_VERSIONS = gnm_test_catalog.MAINTAINED_MAJOR_VERSIONS
 _MAJOR_VERSION_TO_VARIANTS_MAP = gnm_test_catalog.MAJOR_VERSION_TO_VARIANTS_MAP
+
+
+# These are upper bounds on the acceptable runtime for each model in a single
+# Float32 call operation. We expect most calls to be faster - but this allows
+# us to catch major regressions in runtime performance.
+_BENCHMARK_CONFIGS = [
+    # Head
+    dict(variant=gnm_numpy.GNMVariant.HEAD, batch_size=1, max_runtime_ms=80.0),
+    dict(
+        variant=gnm_numpy.GNMVariant.HEAD, batch_size=100, max_runtime_ms=1500.0
+    ),
+]
 
 
 def transform_points(transform: np.ndarray, points: np.ndarray) -> np.ndarray:
@@ -89,7 +106,7 @@ def get_pose_correctives_test_cases(gnm_np: gnm_numpy.GNM):
   )
   test_cases.append({
       'pose_correctives_regressor': (
-          pose_correctives_regressor.T  # pyrefly: ignore[bad-assignment]
+          pose_correctives_regressor.T
       ),
       'rotations': rotations,
       'expected_pose_correctives': expected_pose_correctives,
@@ -127,20 +144,24 @@ def get_eye_test_cases():
 
 
 class GNMNumpyTest(parameterized.TestCase):
-  gnms: dict[str, dict[str, gnm_numpy.GNM]]
+  gnms: gnm_test_utils.LazyGNMDict[gnm_numpy.GNM]
 
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    cls.gnms = {}
-    for version in _MAINTAINED_MAJOR_GNM_VERSIONS:
-      cls.gnms[version] = {}
-      for variant in _MAJOR_VERSION_TO_VARIANTS_MAP[version]:
-        if variant in _SUPPORTED_VARIANTS:
-          cls.gnms[version][variant] = gnm_numpy.GNM.from_local(
-              gnm_numpy.GNMMajorVersion(version.removeprefix('v')),
-              gnm_numpy.GNMVariant(variant),
-          )
+    # Load the models on demand, keeping one in memory at a time.
+    cls.gnms = gnm_test_utils.LazyGNMDict(
+        functools.partial(gnm_test_utils.load_gnm, gnm_numpy.GNM),
+        variants_by_version={
+            version: [
+                variant
+                for variant in _MAJOR_VERSION_TO_VARIANTS_MAP[version]
+                if variant in _ALL_SUPPORTED_VARIANTS
+            ]
+            for version in _MAINTAINED_MAJOR_GNM_VERSIONS
+        },
+    )
+    cls.addClassCleanup(cls.gnms.clear)
 
   def setUp(self):
     super().setUp()
@@ -160,14 +181,11 @@ class GNMNumpyTest(parameterized.TestCase):
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_global_translation(self, version: str, variant: str):
     """Test that global translation shifts joints and vertices uniformly."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
     translation = np.array([1, 2, 3], dtype=np.float32)
     kwargs = self._get_default_kwargs(gnm_np)
     desired = gnm_np(**kwargs) + translation
@@ -191,13 +209,11 @@ class GNMNumpyTest(parameterized.TestCase):
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_global_rotation(self, version: str, variant: str):
     """Test that a root joint rotation is correctly modelled."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
     kwargs = self._get_default_kwargs(gnm_np)
     vertices_zero_pose = gnm_np(**kwargs)
 
@@ -245,13 +261,11 @@ class GNMNumpyTest(parameterized.TestCase):
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_bad_shape(self, version: str, variant: str):
     """Badly shaped parameter should throw a ValueError."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
     bad_dimension = (
         gnm_np.expression_dim + gnm_np.identity_dim + gnm_np.num_joints
     )
@@ -263,12 +277,10 @@ class GNMNumpyTest(parameterized.TestCase):
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_bad_shape_joint_transforms(self, version: str, variant: str):
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
     bad_dimension = (
         gnm_np.expression_dim + gnm_np.identity_dim + gnm_np.num_joints
     )
@@ -289,13 +301,11 @@ class GNMNumpyTest(parameterized.TestCase):
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_identity(self, version: str, variant: str):
     """Test that vertices are different after applying the identity model."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
     kwargs = self._get_default_kwargs(gnm_np)
     verts_zero_identity = gnm_np(**kwargs)
     identity = np.ones(gnm_np.identity_dim)
@@ -305,14 +315,12 @@ class GNMNumpyTest(parameterized.TestCase):
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
       variant=tuple(
-          v.value for v in _SUPPORTED_VARIANTS if 'hand' not in v.value
+          v.value for v in _GEOMETRY_ONLY_VARIANTS if 'hand' not in v.value
       ),
   )
   def test_expression(self, version: str, variant: str):
     """Test that vertices are different after applying the expression model."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
     kwargs = self._get_default_kwargs(gnm_np)
     verts_zero_expression = gnm_np(**kwargs)
     expression = np.ones(gnm_np.expression_dim)
@@ -328,9 +336,7 @@ class GNMNumpyTest(parameterized.TestCase):
       self, version: str, variant: str, batch_size: tuple[int, ...]
   ):
     """Test extracting vertices and landmarks."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
     kwargs = self._get_default_kwargs(gnm_np, batch_dims=batch_size)
     verts, landmarks = gnm_np.vertices_and_landmarks(
         gnm_numpy.GNMLandmarksType.HEAD_SPARSE_68, **kwargs
@@ -340,25 +346,22 @@ class GNMNumpyTest(parameterized.TestCase):
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_vertex_groups_exist(self, version: str, variant: str):
     """Tests that there is at least one vertex group defined."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    self.assertNotEmpty(self.gnms[version][variant].vertex_group_names)
+    gnm_np = self.gnms.get_or_skip(version, variant)
+    self.assertNotEmpty(gnm_np.vertex_group_names)
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_vertex_groups(self, version: str, variant: str):
     """Tests that we can retrieve values and indices for each vertex group."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
 
-    # Skip the finger tips, since they have zero weights.
+    # Skip the groups that are zero by design, e.g. the finger tips.
     valid_group_names = [
         n
         for n in gnm_np.vertex_group_names
@@ -379,13 +382,11 @@ class GNMNumpyTest(parameterized.TestCase):
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_uvs(self, version: str, variant: str):
     """Tests that texture coordinates have the correct format."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm = self.gnms[version][variant]
+    gnm = self.gnms.get_or_skip(version, variant)
     self.assertEqual(gnm.quad_uvs.shape[:2], gnm.quads.shape)
     self.assertEqual(gnm.triangle_uvs.shape[:2], gnm.triangles.shape)
     self.assertEqual(gnm.vertex_uvs.shape, (gnm.num_vertices, 2))
@@ -406,39 +407,196 @@ class GNMNumpyTest(parameterized.TestCase):
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
+  )
+  def test_prune_vertices(self, version: str, variant: str):
+    """Tests that pruning keeps all mesh data aligned with the kept vertices."""
+    gnm = self.gnms.get_or_skip(version, variant)
+    pruned = copy.deepcopy(gnm)
+    _ = pruned.edge_list  # Populates a cache that pruning must invalidate.
+
+    x = gnm.template_vertex_positions[:, 0]
+    keep = np.flatnonzero(x >= np.median(x))
+    pruned.prune_vertices(keep)
+
+    new_index = np.full(gnm.num_vertices, -1)
+    new_index[keep] = np.arange(len(keep))
+    kept_quads = np.flatnonzero(np.all(new_index[gnm.quads] >= 0, axis=-1))
+    kept_triangles = np.flatnonzero(
+        np.all(new_index[gnm.triangles] >= 0, axis=-1)
+    )
+
+    np.testing.assert_array_equal(
+        pruned.quads, new_index[gnm.quads[kept_quads]]
+    )
+    np.testing.assert_array_equal(pruned.quad_uvs, gnm.quad_uvs[kept_quads])
+    np.testing.assert_array_equal(
+        pruned.triangles, new_index[gnm.triangles[kept_triangles]]
+    )
+    np.testing.assert_array_equal(
+        pruned.triangle_uvs, gnm.triangle_uvs[kept_triangles]
+    )
+    np.testing.assert_array_equal(
+        pruned.vertex_groups, gnm.vertex_groups[:, keep]
+    )
+    np.testing.assert_array_equal(
+        pruned.joint_regressor, gnm.joint_regressor[:, keep]
+    )
+    self.assertLess(pruned.edge_list.max(), pruned.num_vertices)
+    # Quads and triangles are dropped independently, so each face must keep
+    # its own tile rather than one inferred from its position in the array.
+    np.testing.assert_array_equal(
+        pruned.quad_udim_tiles, gnm.quad_udim_tiles[kept_quads]
+    )
+    np.testing.assert_array_equal(
+        pruned.triangle_udim_tiles, gnm.triangle_udim_tiles[kept_triangles]
+    )
+
+  @parameterized.product(
+      version=_MAINTAINED_MAJOR_GNM_VERSIONS,
+      variant=tuple(_ALL_SUPPORTED_VARIANTS),
+  )
+  def test_udim_tiles(self, version: str, variant: str):
+    """Tests that every face is assigned the tile of the region holding it."""
+    gnm = self.gnms.get_or_skip(version, variant)
+    quad_tiles = gnm.quad_udim_tiles
+
+    actual_tiles = set(np.unique(quad_tiles).tolist())
+    self.assertEqual(actual_tiles, _expected_udim_tiles(gnm))
+    self.assertEqual(quad_tiles.shape, (len(gnm.quads),))
+
+    # Triangles inherit the tile of the quad they were split from.
+    np.testing.assert_array_equal(
+        gnm.triangle_udim_tiles, np.tile(quad_tiles, 2)
+    )
+
+  @parameterized.product(
+      version=_MAINTAINED_MAJOR_GNM_VERSIONS,
+      variant=tuple(_ALL_SUPPORTED_VARIANTS),
+  )
+  def test_udim_uvs(self, version: str, variant: str):
+    """Tests that UDIM texture coordinates follow the UDIM convention."""
+    gnm = self.gnms.get_or_skip(version, variant)
+    quad_tiles = gnm.quad_udim_tiles
+    triangle_tiles = gnm.triangle_udim_tiles
+    quad_uvs_udim = gnm.quad_uvs_udim
+    triangle_uvs_udim = gnm.triangle_uvs_udim
+
+    self.assertEqual(quad_uvs_udim.shape, gnm.quad_uvs.shape)
+    self.assertEqual(triangle_uvs_udim.shape, gnm.triangle_uvs.shape)
+
+    # A face's UDIM coordinates are its original coordinates translated by the
+    # integer origin of its tile, and nothing else.
+    for uvs, uvs_udim, tiles in (
+        (gnm.quad_uvs, quad_uvs_udim, quad_tiles),
+        (gnm.triangle_uvs, triangle_uvs_udim, triangle_tiles),
+    ):
+      indices = tiles - gnm_udim.UDIM_FIRST_TILE
+      origins = np.stack(
+          [
+              indices % gnm_udim.UDIM_TILES_PER_ROW,
+              indices // gnm_udim.UDIM_TILES_PER_ROW,
+          ],
+          axis=-1,
+      )
+      np.testing.assert_allclose(
+          uvs_udim - uvs, np.broadcast_to(origins[:, None, :], uvs.shape)
+      )
+
+    # `test_uvs` asserts the original coordinates lie in the unit square, so
+    # the translation above places every tile inside its own unit square. Two
+    # distinct tiles therefore cannot share texture space, which is the whole
+    # point of the layout.
+    for tile in np.unique(quad_tiles):
+      index = tile - gnm_udim.UDIM_FIRST_TILE
+      origin = np.array([
+          index % gnm_udim.UDIM_TILES_PER_ROW,
+          index // gnm_udim.UDIM_TILES_PER_ROW,
+      ])
+      uvs = quad_uvs_udim[quad_tiles == tile]
+      self.assertTrue(np.all(uvs >= origin), f'tile {tile} falls below itself.')
+      self.assertTrue(
+          np.all(uvs <= origin + 1.0), f'tile {tile} falls above itself.'
+      )
+
+    # A renderer identifies the tile of a texture coordinate as
+    # `1001 + floor(u) + 10 * floor(v)`, with no access to `quad_udim_tiles`.
+    # The layout is only readable by standard UDIM tooling if that agrees.
+    corners = quad_uvs_udim.reshape(-1, 2)
+    np.testing.assert_array_equal(
+        gnm_udim.UDIM_FIRST_TILE
+        + np.floor(corners[:, 0]).astype(np.int32)
+        + gnm_udim.UDIM_TILES_PER_ROW
+        * np.floor(corners[:, 1]).astype(np.int32),
+        np.repeat(quad_tiles, gnm.quads.shape[-1]),
+    )
+
+  @parameterized.product(
+      version=_MAINTAINED_MAJOR_GNM_VERSIONS,
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
+  )
+  def test_udim_tiles_separate_nested_eye_surfaces(
+      self, version: str, variant: str
+  ):
+    """Tests that an eye's interior and exterior do not share a tile.
+
+    Each eye's interior is unwrapped inside its own exterior, so a single tile
+    per eye would leave two surfaces competing for the same texels. This is
+    the defect the seven-tile layout exists to fix. The upper-body variants
+    use their own packed atlas in which the two surfaces are already apart,
+    so they are not covered here.
+    """
+    gnm = self.gnms.get_or_skip(version, variant)
+    if 'eye_interiors' not in set(gnm.vertex_group_names):
+      self.skipTest(f'variant {variant} has no eyes.')
+    quad_tiles = gnm.quad_udim_tiles
+
+    for eye in ('left_eye', 'right_eye'):
+      interior = gnm.quad_indices_for_group(eye, '&eye_interiors')
+      exterior = gnm.quad_indices_for_group(eye, '&eye_exteriors')
+
+      # The two surfaces really do share texture space before the split.
+      interior_uvs = gnm.quad_uvs[interior].reshape(-1, 2)
+      exterior_uvs = gnm.quad_uvs[exterior].reshape(-1, 2)
+      self.assertTrue(
+          np.all(interior_uvs.min(axis=0) >= exterior_uvs.min(axis=0))
+          and np.all(interior_uvs.max(axis=0) <= exterior_uvs.max(axis=0)),
+          f'{eye} interior is no longer nested inside its exterior.',
+      )
+
+      self.assertNotEqual(
+          set(quad_tiles[interior].tolist()),
+          set(quad_tiles[exterior].tolist()),
+          f'{eye} interior and exterior share a UDIM tile.',
+      )
+
+  @parameterized.product(
+      version=_MAINTAINED_MAJOR_GNM_VERSIONS,
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_edge_list(self, version: str, variant: str):
     """Checks that the edge list matches the quad topology."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
 
-    # We build two adjacency matrices, one for the quads, and one for the edge
-    # list, and check they are the same.
-    num_vertices = gnm_np.num_vertices
-    adjacency_matrix_quads = np.zeros((num_vertices, num_vertices), dtype=bool)
-    adjacency_matrix_edge_list = adjacency_matrix_quads.copy()
-
-    for v1, v2, v3, v4 in gnm_np.quads:
-      adjacency_matrix_quads[v1, v2] = adjacency_matrix_quads[v2, v1] = True
-      adjacency_matrix_quads[v2, v3] = adjacency_matrix_quads[v3, v2] = True
-      adjacency_matrix_quads[v3, v4] = adjacency_matrix_quads[v4, v3] = True
-      adjacency_matrix_quads[v4, v1] = adjacency_matrix_quads[v1, v4] = True
-
-    for v1, v2 in gnm_np.edge_list:
-      adjacency_matrix_edge_list[v1, v2] = True
+    # Every quad side must appear in the edge list in both directions, and the
+    # edge list must not contain any other edge. Compare the sets of unique
+    # directed edges rather than dense (V, V) adjacency matrices, which take
+    # several GiB of memory for the larger models.
+    quads = np.asarray(gnm_np.quads)
+    quad_edges = np.concatenate(
+        [quads[:, [i, (i + 1) % 4]] for i in range(4)], axis=0
+    )
+    quad_edges = np.concatenate([quad_edges, quad_edges[:, ::-1]], axis=0)
 
     np.testing.assert_array_equal(
-        adjacency_matrix_quads, adjacency_matrix_edge_list
+        np.unique(np.asarray(gnm_np.edge_list), axis=0),
+        np.unique(quad_edges, axis=0),
     )
 
   @parameterized.parameters(get_group_subsets_test_cases())
   def test_group_subsets(self, version: str, variant: str, group_name: str):
     """Tests that the convenience functions for accessing data subsets work."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
 
     group_indices = gnm_np.vertex_group_indices(group_name)
     triangles = gnm_np.triangles_group(group_name)
@@ -463,16 +621,14 @@ class GNMNumpyTest(parameterized.TestCase):
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
       variant=tuple(
-          v.value for v in _SUPPORTED_VARIANTS if 'hand' not in v.value
+          v.value for v in _GEOMETRY_ONLY_VARIANTS if 'hand' not in v.value
       ),
   )
   def test_parts_are_non_overlapping_and_complete(
       self, version: str, variant: str
   ):
     """Check that separate parts are non-overlapping and complete GNM."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm = self.gnms[version][variant]
+    gnm = self.gnms.get_or_skip(version, variant)
     combined = np.stack([gnm.vertex_group(n) for n in gnm.mesh_component_names])
     np.testing.assert_array_equal(
         np.sum(combined, axis=0), np.ones(gnm.num_vertices)
@@ -480,32 +636,26 @@ class GNMNumpyTest(parameterized.TestCase):
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(
-          v.value for v in _SUPPORTED_VARIANTS if 'hand' not in v.value
-      ),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_mesh_component_names_include_skin(self, version: str, variant: str):
     """Check that the mesh_component_names include 'skin'."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm = self.gnms[version][variant]
+    gnm = self.gnms.get_or_skip(version, variant)
     self.assertIn('skin', gnm.mesh_component_names)
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_vertex_group_names_include_skin(self, version: str, variant: str):
     """Check that the vertex_group_names include 'skin'."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm = self.gnms[version][variant]
+    gnm = self.gnms.get_or_skip(version, variant)
     self.assertIn('skin', gnm.vertex_group_names)
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
       variant=tuple(
-          v.value for v in _SUPPORTED_VARIANTS if 'hand' not in v.value
+          v.value for v in _GEOMETRY_ONLY_VARIANTS if 'hand' not in v.value
       ),
   )
   def test_mirror_indices(self, version: str, variant: str):
@@ -513,23 +663,19 @@ class GNMNumpyTest(parameterized.TestCase):
 
     See mirror_indices_test.
     """
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm = self.gnms[version][variant]
+    gnm = self.gnms.get_or_skip(version, variant)
     self.assertCountEqual(gnm.mirror_indices, range(gnm.num_vertices))
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
       variant=tuple(
-          v.value for v in _SUPPORTED_VARIANTS if 'hand' not in v.value
+          v.value for v in _GEOMETRY_ONLY_VARIANTS if 'hand' not in v.value
       ),
       vertex_group=['left_eye', 'right_eye'],
   )
   def test_eyes_dont_move(self, version: str, variant: str, vertex_group: str):
     """Eyes should not move even if every expression shape is applied."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
     indices = gnm_np.vertex_group_indices(vertex_group)
     all_expressions_no_pupil = np.ones(gnm_np.expression_dim)
     regions = gnm_utils.expression_to_regions(all_expressions_no_pupil, gnm_np)
@@ -541,15 +687,13 @@ class GNMNumpyTest(parameterized.TestCase):
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_joints_with_identity_dont_match_template(
       self, version: str, variant: str
   ):
     """Given a random identity, joints should _not_ match the template."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
 
     thresholds = get_joints_with_identity_thresholds(gnm_np)
 
@@ -561,7 +705,7 @@ class GNMNumpyTest(parameterized.TestCase):
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
       variant=tuple(
-          v.value for v in _SUPPORTED_VARIANTS if 'hand' not in v.value
+          v.value for v in _GEOMETRY_ONLY_VARIANTS if 'hand' not in v.value
       ),
       side=['&left', '&right'],  # Note '&' for group intersection.
   )
@@ -569,9 +713,7 @@ class GNMNumpyTest(parameterized.TestCase):
       self, version: str, variant: str, side: str
   ):
     """Tests eye interior is inside exterior for template and identities."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
     interior_indices = gnm_np.vertex_group_indices('eye_interiors', side)
     exterior_triangles = gnm_np.triangles_group('eye_exteriors', side)
 
@@ -602,14 +744,12 @@ class GNMNumpyTest(parameterized.TestCase):
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
       variant=tuple(
-          v.value for v in _SUPPORTED_VARIANTS if 'hand' not in v.value
+          v.value for v in _GEOMETRY_ONLY_VARIANTS if 'hand' not in v.value
       ),
   )
   def test_expression_basis_shape(self, version: str, variant: str):
     """Tests the expression basis is accessible and has the expected shape."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
     self.assertEqual(
         gnm_np.expression_basis.shape,
         (gnm_np.expression_dim, gnm_np.num_vertices, 3),
@@ -618,7 +758,7 @@ class GNMNumpyTest(parameterized.TestCase):
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
       variant=tuple(
-          v.value for v in _SUPPORTED_VARIANTS if 'hand' not in v.value
+          v.value for v in _GEOMETRY_ONLY_VARIANTS if 'hand' not in v.value
       ),
       vertex_groups=(
           ('pupils', '&left'),
@@ -629,16 +769,14 @@ class GNMNumpyTest(parameterized.TestCase):
       self, version: str, variant: str, vertex_groups: Sequence[str]
   ):
     """Tests the pupil UV coordinates are close to (0.5, 0.5)."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
     uv = np.mean(gnm_np.vertex_uvs_group(*vertex_groups), axis=0)
     self.assertLess(np.linalg.norm(uv - 0.5), 2e-3)
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
       variant=tuple(
-          v.value for v in _SUPPORTED_VARIANTS if 'hand' not in v.value
+          v.value for v in _GEOMETRY_ONLY_VARIANTS if 'hand' not in v.value
       ),
       side=['left', 'right'],
       group=['eye_interiors', 'eye_exteriors'],
@@ -648,9 +786,7 @@ class GNMNumpyTest(parameterized.TestCase):
       self, version: str, variant: str, side: str, group: str, axis: int
   ):
     """Checks that model-space axes align with UV axes for eyes."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
     side_indices = gnm_np.vertex_group_indices(side)
     group_indices = gnm_np.vertex_group_indices(group)
     side_group_indices = np.intersect1d(side_indices, group_indices)
@@ -663,19 +799,17 @@ class GNMNumpyTest(parameterized.TestCase):
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_omit_all_parameters(self, version: str, variant: str):
     """If all parameters are omitted, GNM returns the template vertices."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm = self.gnms[version][variant]
+    gnm = self.gnms.get_or_skip(version, variant)
     expected = gnm.template_vertex_positions
     np.testing.assert_allclose(expected, gnm(), atol=1e-6)
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
       batch_dims=[[], [1], [1, 2], [2, 1, 2]],
       parameter_count=[1, 2, 3, 4],
   )
@@ -687,9 +821,7 @@ class GNMNumpyTest(parameterized.TestCase):
       parameter_count: int,
   ):
     """Exercise GNM with various batch dimensions and omitted parameters."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm = self.gnms[version][variant]
+    gnm = self.gnms.get_or_skip(version, variant)
 
     parameters = self._get_default_kwargs(gnm, batch_dims)
 
@@ -700,17 +832,15 @@ class GNMNumpyTest(parameterized.TestCase):
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_pose_correctives(self, version: str, variant: str):
     """Test that the pose correctives are correct."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
 
     test_cases = get_pose_correctives_test_cases(gnm_np)
     for case in test_cases:
-      gnm = copy.deepcopy(gnm_np)
+      gnm = copy.copy(gnm_np)
       gnm.pose_correctives_regressor = case['pose_correctives_regressor']
 
       pose_correctives = gnm.compute_pose_correctives(case['rotations'])
@@ -719,14 +849,13 @@ class GNMNumpyTest(parameterized.TestCase):
           pose_correctives, case['expected_pose_correctives'], atol=1e-6
       )
 
-  @parameterized.parameters(
-      _MAINTAINED_MAJOR_GNM_VERSIONS,
+  @parameterized.product(
+      version=_MAINTAINED_MAJOR_GNM_VERSIONS,
+      variant=('head',),
   )
-  def test_multiple_vertex_groups(self, version: str):
+  def test_multiple_vertex_groups(self, version: str, variant: str):
     """Test we can combine multiple vertex groups."""
-    if 'head' not in self.gnms[version]:
-      self.skipTest(f'variant head not supported in {version}.')
-    gnm = self.gnms[version]['head']
+    gnm = self.gnms.get_or_skip(version, variant)
 
     # Compare two ways of combining both eyeballs fully.
     np.testing.assert_array_equal(
@@ -738,7 +867,7 @@ class GNMNumpyTest(parameterized.TestCase):
     self.assertEmpty(gnm.vertex_group_indices('left', '-left'))
     np.testing.assert_equal(gnm.vertex_group_mask('~left', 'left'), True)
     np.testing.assert_equal(gnm.vertex_group_mask('left', '~left'), True)
-    neg_mask = ~gnm.vertex_group_mask(  # pyrefly: ignore[unsupported-operation]
+    neg_mask = ~gnm.vertex_group_mask(
         'left'
     )
     np.testing.assert_equal(
@@ -767,9 +896,7 @@ class GNMNumpyTest(parameterized.TestCase):
       self, version: str, variant: str
   ):
     """Test the left and right groups have the same number of vertices."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm = self.gnms[version][variant]
+    gnm = self.gnms.get_or_skip(version, variant)
     self.assertEqual(
         len(gnm.vertex_group_indices('left')),
         len(gnm.vertex_group_indices('right')),
@@ -783,9 +910,7 @@ class GNMNumpyTest(parameterized.TestCase):
       self, version: str, variant: str
   ):
     """Tests that the identity names contain all expected groups."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm = self.gnms[version][variant]
+    gnm = self.gnms.get_or_skip(version, variant)
 
     # Only check for the groups existing in the GNM model.
     expected_groups = gnm_utils.identity_region_names(gnm)
@@ -819,9 +944,7 @@ class GNMNumpyTest(parameterized.TestCase):
       self, version: str, variant: str
   ):
     """Tests that the expression names contain all expected groups."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm = self.gnms[version][variant]
+    gnm = self.gnms.get_or_skip(version, variant)
 
     regexes = [
         f'^{n}_[0-9][0-9][0-9]$'
@@ -887,27 +1010,24 @@ class GNMNumpyTest(parameterized.TestCase):
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_adding_and_removing_vertex_group_names_does_not_raise_error(
       self, version: str, variant: str
   ):
     """Tests that adding and removing vertex group names does not raise."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm = self.gnms[version][variant]
+    # Copy to avoid modifying the cached model for other tests.
+    gnm = copy.copy(self.gnms.get_or_skip(version, variant))
     gnm.vertex_group_names = [*gnm.vertex_group_names, 'new_group']
     gnm.vertex_group_names = gnm.vertex_group_names[:-1]
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_add_vertex_group(self, version: str, variant: str):
     """Tests adding a new vertex group."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm = self.gnms[version][variant]
+    gnm = self.gnms.get_or_skip(version, variant)
 
     new_group_name = 'test_new_group'
     new_group_value = np.random.uniform(size=(gnm.num_vertices,))
@@ -932,13 +1052,11 @@ class GNMNumpyTest(parameterized.TestCase):
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_to_numpy_data_dict(self, version: str, variant: str):
     """Tests to_numpy_data_dict method."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm = self.gnms[version][variant]
+    gnm = self.gnms.get_or_skip(version, variant)
 
     data_dict = gnm.to_numpy_data_dict()
 
@@ -957,13 +1075,11 @@ class GNMNumpyTest(parameterized.TestCase):
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
   )
   def test_from_gnm(self, version: str, variant: str):
     """Tests from_gnm factory method."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm = self.gnms[version][variant]
+    gnm = self.gnms.get_or_skip(version, variant)
 
     new_gnm = gnm_numpy.GNM.from_gnm(gnm)
 
@@ -984,24 +1100,28 @@ class GNMNumpyTest(parameterized.TestCase):
       self, version: str, variant: str, batch_dims: Sequence[int]
   ):
     """Tests that the vertex normals are computed correctly."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
+    gnm_np = self.gnms.get_or_skip(version, variant)
     parameters = self._get_default_kwargs(gnm_np, batch_dims=batch_dims)
     vertices = gnm_np(**parameters)
     vertex_normals = gnm_np.compute_vertex_normals(vertices)
 
-    if tf_normals is None:
-      self.skipTest('tensorflow_graphics not available on this platform.')
-
-    triangles_batch = np.broadcast_to(
-        gnm_np.triangles, (*batch_dims, *gnm_np.triangles.shape)
-    ).astype(np.int32)
-    vertex_normals_tf = tf_normals.vertex_normals(
-        vertices=vertices,
-        indices=triangles_batch,
-    ).numpy()
-    np.testing.assert_allclose(vertex_normals, vertex_normals_tf, atol=1e-6)
+    # Reference: the normalized sum of the area-weighted normals (i.e. the
+    # unnormalized cross products) of the triangles around each vertex.
+    # `trimesh.geometry.weighted_vertex_normals` is not used because it weights
+    # the face normals by the corner angle rather than by the area of the face.
+    expected_normals = []
+    for mesh_vertices in vertices.reshape(-1, gnm_np.num_vertices, 3):
+      corners = mesh_vertices[gnm_np.triangles]
+      face_normals = np.cross(
+          corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]
+      )
+      expected_normals.append(
+          trimesh.geometry.mean_vertex_normals(
+              gnm_np.num_vertices, gnm_np.triangles, face_normals
+          )
+      )
+    expected_normals = np.reshape(expected_normals, vertex_normals.shape)
+    np.testing.assert_allclose(vertex_normals, expected_normals, atol=1e-6)
 
   @parameterized.product(
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
@@ -1011,10 +1131,9 @@ class GNMNumpyTest(parameterized.TestCase):
       self, version: str, variant: str
   ):
     """Tests that a warning is logged for vertex normals with zero magnitude."""
-    if variant not in self.gnms[version]:
-      self.skipTest(f'variant {variant} not supported in {version}.')
-    gnm_np = self.gnms[version][variant]
-    vertices = gnm_np.template_vertex_positions
+    gnm_np = self.gnms.get_or_skip(version, variant)
+    # Copy, so that the cached model shared with other tests isn't modified.
+    vertices = gnm_np.template_vertex_positions.copy()
 
     # Collapse the faces around vertex 0.
     tmesh = trimesh.Trimesh(vertices, gnm_np.triangles, process=False)
@@ -1025,15 +1144,38 @@ class GNMNumpyTest(parameterized.TestCase):
       gnm_np.compute_vertex_normals(vertices)
     self.assertIn('zero magnitude', log_output.output[0])
 
+  @parameterized.product(
+      _BENCHMARK_CONFIGS,
+      version=_MAINTAINED_MAJOR_GNM_VERSIONS,
+  )
+  def test_benchmark_call(
+      self,
+      version: str,
+      variant: gnm_numpy.GNMVariant,
+      batch_size: int,
+      max_runtime_ms: float,
+  ):
+    """Tests the benchmark for GNM on Float32 operations."""
+    gnm = self.gnms.get_or_skip(version, variant)
+
+    parameters = self._get_default_kwargs(gnm, batch_dims=[batch_size])
+    parameters = {k: v.astype(np.float32) for k, v in parameters.items()}
+
+    # Run the benchmark.
+    t0 = time.time()
+    gnm(**parameters)
+    t1 = time.time()
+    self.assertLess(1000.0 * (t1 - t0), max_runtime_ms)
+
 
 class GNMNumpyFactoryMethodsTest(parameterized.TestCase):
   """Tests for instantiating GNM using factory methods."""
 
   @parameterized.product(
-      variant=tuple(_SUPPORTED_VARIANTS),
+      variant=tuple(_GEOMETRY_ONLY_VARIANTS),
       version=_MAINTAINED_MAJOR_GNM_VERSIONS,
   )
-  def test_from_local_successful(self, variant, version):
+  def test_from_remote_successful(self, variant, version):
     if variant not in _MAJOR_VERSION_TO_VARIANTS_MAP[version]:
       self.skipTest(f'variant {variant} not supported in {version}.')
 
@@ -1041,9 +1183,19 @@ class GNMNumpyFactoryMethodsTest(parameterized.TestCase):
     major_version = gnm_numpy.GNMMajorVersion(version[1:])
     gnm_variant = gnm_numpy.GNMVariant(variant)
 
-    model = gnm_numpy.GNM.from_local(major_version, gnm_variant)
+    model = gnm_numpy.GNM.from_remote(major_version, gnm_variant)
     self.assertIsInstance(model, gnm_numpy.GNM)
 
 
+def _expected_udim_tiles(gnm: gnm_numpy.GNM) -> set[int]:
+  """The UDIM tiles whose regions this variant defines all the groups for."""
+  defined = set(gnm.vertex_group_names)
+  tiles = set()
+  for tile, groups in gnm_udim.UDIM_TILE_REGIONS.items():
+    if all(group.lstrip('|&-~') in defined for group in groups):
+      tiles.add(tile)
+  return tiles
+
+
 if __name__ == '__main__':
-  absltest.main()
+  absltest.main(testLoader=gnm_test_utils.ModelOrderedTestLoader())

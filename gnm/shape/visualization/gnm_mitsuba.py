@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Render a GNM mesh with Mitsuba."""
+"""Render a GNM mesh with Mitsuba.
+
+This is the rendering backend of `render_gnm_mitsuba`, which prepares and
+batches its arguments; call `render_gnm_mitsuba.render_gnm` rather than `render`
+directly.
+"""
 
 from __future__ import annotations
 
@@ -188,8 +193,8 @@ def create_mitsuba_mesh(
   )
 
   mi_mesh = mi.Mesh(properties)
-  mi_mesh.from_fields(  # pyrefly: ignore[missing-attribute]
-      faces=mi.TensorXu32(  # pyrefly: ignore[not-callable]
+  mi_mesh.from_fields(
+      faces=mi.TensorXu32(
           faces.astype(np.uint32)
       ),
       positions=mi.TensorXf32(vertices.astype(np.float32)),
@@ -204,9 +209,9 @@ def create_mitsuba_mesh(
       raise ValueError(
           f'Vertex colors must be of type float32, got {vertex_colors.dtype}'
       )
-    mi_mesh.add_attribute(  # pyrefly: ignore[missing-argument]
+    mi_mesh.add_attribute(
         'vertex_colors',
-        vertex_colors.astype(np.float32),  # pyrefly: ignore[bad-argument-type]
+        vertex_colors.astype(np.float32),
     )
 
   return mi_mesh

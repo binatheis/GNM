@@ -23,11 +23,15 @@ from typing import Any, Self
 
 from etils import epath
 from gnm.shape import gnm_data_loader
+from gnm.shape import gnm_factory_mixins
 from gnm.shape.data.versions import gnm_specs
 
 
+
+# `from_remote`) into separate public/internal mixin modules, selected via
+# copybara, to reduce the number of copybara strips in this class.
 @dataclasses.dataclass(init=False)
-class GNMBase(abc.ABC):
+class GNMBase(gnm_factory_mixins.GNMFactoryMethodsMixin, abc.ABC):
   """Base GNM class."""
 
   version: gnm_specs.GNMVersion
@@ -39,9 +43,25 @@ class GNMBase(abc.ABC):
       version: gnm_specs.GNMMajorVersion,
       variant: gnm_specs.GNMVariant,
   ) -> Self:
-    """Creates a GNM instance from a local model file."""
-    data_dict = gnm_data_loader.load_model_from_runfile(version, variant)
-    return cls._from_model_data(data_dict)  # pyrefly: ignore[bad-return]
+    """Creates a GNM instance from the model file bundled in this wheel.
+
+    Fork of google/GNM: upstream deprecated `from_local()` in favor of the
+    `from_remote()` download helpers and removed the model files from the
+    package, but the AudioRig wheel ships `data/**/*.npz` so that Blender can
+    load the model fully offline. The bundled file is read through
+    `from_custom_file()`, so it goes through the same validation as any custom
+    model file.
+
+    Args:
+      version: GNM major version.
+      variant: GNM model variant.
+
+    Returns:
+      A GNM instance loaded with the model weights.
+    """
+    return cls.from_custom_file(
+        gnm_data_loader.get_packaged_model_path(version, variant)
+    )
 
   @classmethod
   def from_remote(
@@ -79,7 +99,7 @@ class GNMBase(abc.ABC):
   def from_gnm(cls, gnm: GNMBase) -> Self:
     """Creates a GNM instance from another GNM instance."""
     data_dict = gnm.to_numpy_data_dict()
-    return cls._from_model_data(data_dict)  # pyrefly: ignore[bad-return]
+    return cls._from_model_data(data_dict)
 
   @abc.abstractmethod
   def to_numpy_data_dict(self) -> dict[str, Any]:
@@ -90,7 +110,7 @@ class GNMBase(abc.ABC):
   @abc.abstractmethod
   def _from_model_data(
       cls,
-      data_dict: Mapping[str, Any],
+      model_data: Mapping[str, Any],
   ) -> Self:
     """Creates a GNM instance from a model data."""
     pass

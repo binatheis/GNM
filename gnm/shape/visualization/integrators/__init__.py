@@ -19,7 +19,7 @@ from __future__ import annotations
 import functools
 import importlib
 
-import mitsuba as mi  # pyrefly: ignore[missing-import]
+import mitsuba as mi
 
 
 def _integrators_variant_callback(old: str | None, new: str) -> None:

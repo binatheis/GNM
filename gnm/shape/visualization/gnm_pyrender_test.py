@@ -21,13 +21,13 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from etils import epath
 from gnm.shape import gnm_numpy
+from gnm.shape import gnm_test_utils
 from gnm.shape.data.versions import gnm_test_catalog
 from gnm.shape.visualization import gnm_pyrender
 import mediapy as media
 import numpy as np
 
 _MAINTAINED_MAJOR_GNM_VERSIONS = gnm_test_catalog.MAINTAINED_MAJOR_VERSIONS
-_MAJOR_VERSION_TO_VARIANTS_MAP = gnm_test_catalog.MAJOR_VERSION_TO_VARIANTS_MAP
 
 _OUTPUTS_TMPDIR = tempfile.TemporaryDirectory()
 _OUTPUTS_DIR = epath.Path(_OUTPUTS_TMPDIR.name)
@@ -41,9 +41,8 @@ class GNMPyrenderTest(parameterized.TestCase):
   def setUpClass(cls):
     super().setUpClass()
     cls.gnms = {
-        version: gnm_numpy.GNM.from_local(
-            gnm_numpy.GNMMajorVersion(version.removeprefix('v')),
-            gnm_numpy.GNMVariant.HEAD,
+        version: gnm_test_utils.load_gnm(
+            gnm_numpy.GNM, version, gnm_numpy.GNMVariant.HEAD
         )
         for version in _MAINTAINED_MAJOR_GNM_VERSIONS
     }

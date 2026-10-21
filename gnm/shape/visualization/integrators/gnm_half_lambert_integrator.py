@@ -26,12 +26,22 @@ callback. Callers should invoke the package-level `register()` (see
 
 from __future__ import annotations
 
-import drjit as dr  # pyrefly: ignore[missing-import]
-import mitsuba as mi  # pyrefly: ignore[missing-import]
+import drjit as dr
+import mitsuba as mi
 import numpy as np
 
 # Light intensity empirically chosen to match render_gnm.
 _LIGHT_INTENSITY = 3.34
+
+_MITSUBA_VERSION = tuple(
+    int(x)
+    for x in (
+        str(mi.__version__).split('.')  # pyrefly: ignore[missing-attribute]
+    )
+    if x.isdigit()
+)
+MITSUBA_USE_LEGACY_BSDF_API = _MITSUBA_VERSION <= (3, 9, 1)
+MITSUBA_USE_LEGACY_SAMPLE_API = _MITSUBA_VERSION <= (3, 9, 1)
 
 
 class GnmHalfLambertIntegrator(mi.SamplingIntegrator):
@@ -49,7 +59,7 @@ class GnmHalfLambertIntegrator(mi.SamplingIntegrator):
         props.get(
             'light_intensity',
             _LIGHT_INTENSITY,
-        )  # pyrefly: ignore[bad-argument-type]
+        )
     )
     self.include_shading = bool(props.get('include_shading', True))
 
@@ -60,7 +70,7 @@ class GnmHalfLambertIntegrator(mi.SamplingIntegrator):
       ray: mi.Ray3f,
       medium: mi.Medium | None = None,
       active: mi.Bool | bool = True,
-  ) -> tuple[mi.Spectrum, mi.Bool, list[mi.Float]]:
+  ) -> tuple[mi.Spectrum, mi.Bool]:
     """Samples the integrator.
 
     Args:
@@ -71,8 +81,8 @@ class GnmHalfLambertIntegrator(mi.SamplingIntegrator):
       active: Whether the ray is active.
 
     Returns:
-      A tuple of the radiance, whether the ray is valid, and the list of
-      intermediate depths.
+      A tuple of the radiance and whether the ray is valid (plus an empty AOV
+      list on older Mitsuba versions).
     """
     del sampler, medium
     scene_intersection = scene.ray_intersect(ray, mi.Bool(active))
@@ -87,9 +97,19 @@ class GnmHalfLambertIntegrator(mi.SamplingIntegrator):
         mi.Color3f(1.0, 1.0, 1.0),
     )
 
-    diffuse_reflectance = scene_intersection.bsdf().eval_diffuse_reflectance(
-        scene_intersection, is_valid
-    )
+    if MITSUBA_USE_LEGACY_BSDF_API:
+      bsdf = scene_intersection.bsdf()
+      diffuse_reflectance = (
+          bsdf.eval_diffuse_reflectance(  # pyrefly: ignore[missing-attribute]
+              scene_intersection, is_valid
+          )
+      )
+    else:
+      diffuse_reflectance = (
+          scene_intersection.bsdf()
+          .eval_features(scene_intersection, is_valid)
+          .diffuse_albedo
+      )
     base_color = vertex_colors * diffuse_reflectance
 
     if self.include_shading:
@@ -98,12 +118,14 @@ class GnmHalfLambertIntegrator(mi.SamplingIntegrator):
           diffuse_reflectance=diffuse_reflectance,
       )
     else:
-      radiance = dr.power(  # pyrefly: ignore[unsupported-operation]
+      radiance = dr.power(
           base_color, 2.2
       )
 
     radiance = dr.select(is_valid, radiance, mi.Color3f(0.0, 0.0, 0.0))
-    return mi.Spectrum(radiance), is_valid, []
+    if MITSUBA_USE_LEGACY_SAMPLE_API:
+      return mi.Spectrum(radiance), is_valid, []  # pyrefly: ignore[bad-return]
+    return mi.Spectrum(radiance), is_valid
 
   def _shade_half_lambert(
       self,
@@ -158,7 +180,7 @@ class GnmHalfLambertIntegrator(mi.SamplingIntegrator):
     # GLTF PBR specular (Cook-Torrance) with roughness=1.0, metallic=0.0:
     # Schlick Fresnel, Smith geometry term, and a constant (roughness=1) NDF.
     fresnel = 0.04 + mi.Float(0.96) * (
-        dr.power(1.0 - v_dot_h, 5.0)  # pyrefly: ignore[unsupported-operation]
+        dr.power(1.0 - v_dot_h, 5.0)
     )
     geometry_view = n_dot_v / (0.5 * n_dot_v + 0.5)
     geometry_light = n_dot_l / (0.5 * n_dot_l + 0.5)
@@ -169,14 +191,14 @@ class GnmHalfLambertIntegrator(mi.SamplingIntegrator):
     diffuse_contrib = mi.Color3f(
         (1.0 - fresnel)
         * diffuse_color
-        / np.pi  # pyrefly: ignore[unsupported-operation]
+        / np.pi
     )
 
     spec_contrib = mi.Color3f(
         (fresnel * geometry * distribution)
         / (
             4.0 * n_dot_l * n_dot_v + 0.001
-        )  # pyrefly: ignore[unsupported-operation]
+        )
     )
 
     return mi.Color3f(

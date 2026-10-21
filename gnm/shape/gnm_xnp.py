@@ -19,6 +19,7 @@ from __future__ import annotations
 import abc
 import collections
 from collections.abc import Mapping, Sequence
+import copy
 import dataclasses
 import functools
 from typing import Any, Self
@@ -27,8 +28,10 @@ from absl import logging
 from etils import enp
 from gnm.shape import gnm_base
 from gnm.shape import gnm_common
+from gnm.shape import gnm_data_schema
 from gnm.shape import gnm_landmarks
 from gnm.shape import gnm_typing
+from gnm.shape import gnm_udim
 from gnm.shape.data.versions import gnm_specs
 import numpy as np
 import numpy.typing as npt
@@ -77,8 +80,10 @@ class GNM(gnm_base.GNMBase):
     skinning_weights: The model's skinning weights, (J, V).
     quads: The mesh topology as quads, (Q, 4).
     triangles: The mesh topology as triangles, (T, 3).
-    quad_uvs: Texture coordinates per quad, (Q, 4, 2).
-    triangle_uvs: Texture coordinates per triangle, (T, 3, 2).
+    quad_uvs: Texture coordinates per quad, (Q, 4, 2). All regions share the
+      unit square and overlap there; prefer `quad_uvs_udim`.
+    triangle_uvs: Texture coordinates per triangle, (T, 3, 2). All regions share
+      the unit square and overlap there; prefer `triangle_uvs_udim`.
     mesh_component_names: The vertex group name corresponding to each separate
       mesh part.
     mirror_indices: The index of each vertex on the other side of the mesh.
@@ -101,6 +106,10 @@ class GNM(gnm_base.GNMBase):
     expression_dim: The dimensionality of the linear expression basis E.
     edge_list: The quad topology represented as a list of directed edges (E, 2).
     vertex_uvs: Per-vertex UV texture coordinates shaped (V, 2).
+    quad_udim_tiles: The UDIM tile number of each quad, (Q,).
+    triangle_udim_tiles: The UDIM tile number of each triangle, (T,).
+    quad_uvs_udim: Per-quad UDIM texture coordinates, (Q, 4, 2).
+    triangle_uvs_udim: Per-triangle UDIM texture coordinates, (T, 3, 2).
   """
 
   _shape_error_type = ValueError
@@ -133,8 +142,8 @@ class GNM(gnm_base.GNMBase):
     del args, kwargs
     raise TypeError(
         f'{self.__class__.__name__} cannot be instantiated directly via'
-        ' constructor. Please use a class factory method such as from_local()'
-        ' or from_model_data().'
+        ' constructor. Please use a class factory method such as'
+        ' from_remote() or from_gnm().'
     )
 
   def __post_init__(self):
@@ -165,12 +174,22 @@ class GNM(gnm_base.GNMBase):
     self._xnp = enp.get_np_module(self.template_vertex_positions)
 
   @classmethod
+  @abc.abstractmethod
+  def _get_np_module(cls) -> enp.NpModule:
+    """Returns the array module (e.g., np, jnp, torch, tnp) for this backend."""
+    raise NotImplementedError(
+        f'{cls.__name__} is an abstract backend-agnostic base class and'
+        ' does not define a backend array module. Use a concrete backend'
+        ' subclass (e.g., gnm_numpy.GNM, gnm_pytorch.GNM).'
+    )
+
+  @classmethod
   def _prepare_init_kwargs(
       cls,
       model_data: Mapping[str, Any],
-      xnp: enp.NpModule,
   ) -> dict[str, Any]:
     """Prepares and casts GNM initialization arguments using xnp."""
+    xnp = cls._get_np_module()
     init_kwargs = {}
 
     # Identify type convert functions.
@@ -216,13 +235,14 @@ class GNM(gnm_base.GNMBase):
     return init_kwargs
 
   @classmethod
-  def _from_model_data_with_xnp(
+  def _from_model_data(
       cls,
       model_data: Mapping[str, Any],
-      xnp: enp.NpModule,
   ) -> Self:
-    """Creates a GNM instance from a model data dictionary and array module."""
-    init_kwargs = cls._prepare_init_kwargs(model_data, xnp)
+    """Creates a GNM instance from a model data dictionary."""
+    if not gnm_data_schema.is_model_data_valid(model_data):
+      raise ValueError('Validation failed for GNM model data.')
+    init_kwargs = cls._prepare_init_kwargs(model_data)
     # pylint: disable=no-value-for-parameter
     instance = super(GNM, cls).__new__(cls)
     # pylint: enable=no-value-for-parameter
@@ -231,32 +251,26 @@ class GNM(gnm_base.GNMBase):
     instance.__post_init__()
     return instance
 
-  @classmethod
-  @abc.abstractmethod
-  def _from_model_data(
-      cls,
-      data_dict: Mapping[str, Any],
-  ) -> Self:
-    """Creates a GNM instance from a model data dictionary."""
-    raise NotImplementedError(
-        f'{cls.__name__} is an abstract backend-agnostic base class and'
-        ' cannot be loaded directly. Use a concrete backend subclass (e.g.,'
-        ' gnm_numpy.GNM, gnm_pytorch.GNM).'
-    )
-
   def to_numpy_data_dict(self) -> dict[str, Any]:
-    """Returns a dictionary of the GNM data represented as NumPy arrays."""
+    """Returns a dictionary of the GNM data represented as NumPy arrays.
+
+    All values are copies, so modifying the returned dict (or a GNM created from
+    it with `from_gnm()`) never affects this instance, and vice versa.
+    """
     data_dict = {}
     for field in dataclasses.fields(self):
       val = getattr(self, field.name)
       if enp.lazy.is_array(val):
-        # Convert JAX, PyTorch or TF tensors to numpy.
+        # Convert JAX, PyTorch or TF tensors to numpy. `Tensor.numpy()` may
+        # share memory with the tensor, and NumPy arrays are the instance's own
+        # buffers, so `np.array` makes the copy.
         if enp.lazy.is_tf(val):
           val = val.numpy()
-        elif enp.lazy.is_jax(val):
-          val = np.array(val)
         elif enp.lazy.is_torch(val):
           val = val.detach().cpu().numpy()
+        val = np.array(val)
+      else:
+        val = copy.deepcopy(val)
       data_dict[field.name] = val
     return data_dict
 
@@ -637,6 +651,55 @@ class GNM(gnm_base.GNMBase):
   def vertex_uvs_group(self, *names: str) -> npt.NDArray[np.floating]:
     return self.vertex_uvs[self.vertex_group_indices(*names)]
 
+  @property
+  def quad_udim_tiles(self) -> npt.NDArray[np.int32]:
+    """The UDIM tile number of each quad, (Q,).
+
+    Computed on access from vertex groups without caching. Each region of
+    `gnm_udim.UDIM_TILE_REGIONS` whose vertex groups this variant defines
+    claims the quads it covers. The regions are disjoint and, between them,
+    cover the whole mesh.
+
+    Raises:
+      ValueError: If two regions claim the same quad, or if some quad is
+        claimed by none and so cannot be assigned a tile.
+    """
+    return gnm_udim.quad_tiles(self)
+
+  @property
+  def triangle_udim_tiles(self) -> npt.NDArray[np.int32]:
+    """The UDIM tile number of each triangle, (T,).
+
+    Computed on access from vertex groups without caching. The triangulated
+    equivalent of `quad_udim_tiles`: each triangle lies in the same region as
+    the quad it was split from.
+
+    Raises:
+      ValueError: If two regions claim the same triangle, or if some triangle
+        is claimed by none and so cannot be assigned a tile.
+    """
+    return gnm_udim.triangle_tiles(self)
+
+  @property
+  def quad_uvs_udim(self) -> npt.NDArray[np.floating]:
+    """Per-quad texture coordinates in UDIM layout, (Q, 4, 2).
+
+    Computed on access from vertex groups without caching. Unlike `quad_uvs`,
+    which packs every surface into the unit square so that surfaces overlap,
+    these coordinates place each region of `gnm_udim.UDIM_TILE_REGIONS` in its
+    own tile and therefore span more than the unit square.
+    """
+    return gnm_udim.quad_uvs(self)
+
+  @property
+  def triangle_uvs_udim(self) -> npt.NDArray[np.floating]:
+    """Per-triangle texture coordinates in UDIM layout, (T, 3, 2).
+
+    Computed on access from vertex groups without caching. The triangulated
+    equivalent of `quad_uvs_udim`.
+    """
+    return gnm_udim.triangle_uvs(self)
+
   def compute_vertex_normals(
       self,
       vertices: enpt.FloatArray['A1 ... An V 3'],
@@ -650,7 +713,15 @@ class GNM(gnm_base.GNMBase):
       self,
       keep_vertices: enpt.IntArray['V_pruned'],  # pyrefly: ignore[unknown-name]
   ) -> None:
-    """Prunes model vertices in-place."""
+    """Prunes model vertices in-place.
+
+    Faces that lose a vertex are removed together with their texture
+    coordinates. Cached properties derived from the mesh are recomputed on next
+    access. `mirror_indices` is left unchanged.
+
+    Args:
+      keep_vertices: Indices of the vertices to keep, (V_pruned,).
+    """
     xnp = self.xnp
     num_vertices = self.num_vertices
     keep_vertices = xnp.asarray(keep_vertices, dtype=xnp.int32)
@@ -666,6 +737,12 @@ class GNM(gnm_base.GNMBase):
     )
     self.skinning_weights = gnm_common.take(
         self.skinning_weights, keep_vertices, axis=1, xnp=xnp
+    )
+    self.joint_regressor = gnm_common.take(
+        self.joint_regressor, keep_vertices, axis=1, xnp=xnp
+    )
+    self.vertex_groups = gnm_common.take(
+        self.vertex_groups, keep_vertices, axis=1, xnp=xnp
     )
 
     mapper = _scatter_indices(keep_vertices, num_vertices, xnp)
@@ -684,6 +761,12 @@ class GNM(gnm_base.GNMBase):
     self.triangles = gnm_common.take(
         triangles, triangle_indices, axis=0, xnp=xnp
     )
+    self.quad_uvs = gnm_common.take(
+        self.quad_uvs, quad_indices, axis=0, xnp=xnp
+    )
+    self.triangle_uvs = gnm_common.take(
+        self.triangle_uvs, triangle_indices, axis=0, xnp=xnp
+    )
 
     if self.pose_correctives_regressor is not None:
       pose_correctives = xnp.reshape(
@@ -696,6 +779,8 @@ class GNM(gnm_base.GNMBase):
       self.pose_correctives_regressor = xnp.reshape(
           pose_correctives, (-1, keep_vertices.shape[0] * 3)
       )
+
+    _clear_cached_properties(self)
 
 
 def _check_batch_dims(
@@ -754,3 +839,11 @@ def _scatter_indices(keep_vertices, num_vertices, xnp) -> Any:
     mapper = np.full((num_vertices,), -1, dtype=np.int32)
     mapper[keep_vertices] = np.arange(len(keep_vertices), dtype=np.int32)
     return mapper
+
+
+def _clear_cached_properties(obj: object) -> None:
+  """Drops every `functools.cached_property` value computed on `obj`."""
+  for cls in type(obj).__mro__:
+    for name, attribute in vars(cls).items():
+      if isinstance(attribute, functools.cached_property):
+        obj.__dict__.pop(name, None)

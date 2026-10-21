@@ -18,10 +18,13 @@
 # build time by the workflow; the official file is left untouched.
 #
 # Real runtime dependencies of the NumPy geometry path (gnm_numpy.py,
-# gnm_xnp.py, gnm_common.py, gnm_base.py, gnm_data_loader.py, gnm_landmarks.py):
+# gnm_xnp.py, gnm_common.py, gnm_base.py, gnm_data_loader.py, gnm_landmarks.py,
+# gnm_udim.py, gnm_factory_mixins.py):
 #   - numpy
 #   - absl-py (absl.logging only)
 #   - etils (enp + epath)
+#   - immutabledict (gnm_udim.UDIM_TILES)
+#   - typing-extensions (gnm_base.from_local deprecation decorator)
 # Everything else in the official dependency list (tensorflow, opencv-python,
 # trimesh, imageio, ipywidgets, notebook, scipy, ...) is only used by
 # visualization/, demos/ or tests and is intentionally excluded.
@@ -32,15 +35,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gnm-shape"
-version = "3.0.0+audiorig.3"
+version = "3.0.0+audiorig.4"
 description = "GNM Shape Library (core NumPy wheel, no visualization/training frameworks)"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = {text = "Apache-2.0"}
 dependencies = [
     "absl-py",
     "etils[enp,epath]",
+    "immutabledict",
     "numpy",
+    "typing-extensions",
 ]
 
 [tool.setuptools]
@@ -61,9 +66,15 @@ package-dir = {"gnm.shape" = "."}
     "data/**/*.png",
     "data/**/*.jpg",
     "data/**/*.md",
-    "data/**/*.h5",
     "data/**/*.txt",
 ]
-# NOTE: the official package-data also ships "assets/**/*", but that folder is
-# README artwork (~32 MB of teaser gifs) never referenced by the code - it is
-# excluded here to keep the wheel lean.
+# NOTE: the official package-data also ships "assets/**/*" (README artwork,
+# ~32 MB of teaser images never referenced by the code) and "data/**/*.h5"
+# (TensorFlow semantic-sampler decoders that gnm.shape.semantic_sampler needs).
+# Both are excluded here: the artwork is dead weight, and AudioRig replaces the
+# .h5 semantic sampler with ONNX decoders (src/utils/gnm_sampler.py).
+#
+# The fork keeps "data/**/*.npz" (upstream dropped it when it replaced
+# from_local() with from_remote() downloads) because this wheel is meant to be
+# fully offline inside Blender: from_local() is patched in gnm_base.py to load
+# the bundled model file through from_custom_file().
